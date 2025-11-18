@@ -1,0 +1,32 @@
+# @package _global_
+
+data:
+  datasets:
+    type: NYUv2Gaussian
+    splits: [train, test]  # replace with kv pairs if specified configs is in need
+    data_root: ./data/NYUv2/depthbin
+    # depth_root: /data2/ylc/codes/Depth-Anything/metric_depth/nyu_no_restraint_depth_visualize
+    depth_root: ./data/NYUv2/depthbin
+    # seg_root:
+    label_root: ./data/NYUv2/preprocess/base
+    depth_eval: false
+    use_crop: true
+    voxel_size: 0.04
+    pc_range: [0, 0, 0, 4, 4, 2]
+    frustum_size: 8
+  loader:
+    batch_size: 1  # batch size per GPU
+    num_workers: 4
+
+model:
+  channels: 200
+  scene_size: [100, 100, 50]
+  volume_scale: 1
+  num_classes: 12
+  image_shape: [480, 640]
+  voxel_size: 0.04
+  downsample_z: 1
+
+evaluator:
+  type: SSCMetrics
+  num_classes: 12

@@ -1,0 +1,32 @@
+# @package _global_
+
+data:
+  datasets:
+    type: SYNDataScenes11Class
+    splits: [train, test]  # replace with kv pairs if specified configs is in need
+    data_root: ./data/honor_data_0920
+    # depth_root: /data2/ylc/codes/Depth-Anything/metric_depth/nyu_no_restraint_depth_visualize
+    depth_root: ./data/honor_data_0920
+    label_root: ./data/honor_data_0920
+    use_crop: true
+    use_depth_eval: false
+    voxel_size: 0.08
+    pc_range: [0, 0, 0, 4, 4, 2]
+    frustum_size: 8
+    num_classes: 11
+  loader:
+    batch_size: 1  # batch size per GPU
+    num_workers: 4
+
+model:
+  channels: 200
+  scene_size: [50, 50, 25]
+  volume_scale: 1
+  num_classes: 11
+  image_shape: [480, 640]
+  voxel_size: 0.08
+  downsample_z: 1
+
+evaluator:
+  type: SSCMetrics
+  num_classes: 11
