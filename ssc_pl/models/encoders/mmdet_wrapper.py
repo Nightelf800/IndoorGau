@@ -61,6 +61,7 @@ class MMDetWrapper(nn.Module):
     def forward(self, x):
         # TODO: The following is only devised for the MaskDINO implementation.
         # print(f'----------maskdino------------')
+        print(f'x.shape: {x.shape}')
         feats = self.model.extract_feat(x)
         # print(f'len(feats): {len(feats)}')
         # for i in range(len(feats)):
@@ -85,6 +86,9 @@ class MMDetWrapper(nn.Module):
             feats = [proj(feat) for proj, feat in zip(self.out_projs, feats)]
 
         bs = feats[0].size(0)
+        for i in range(len(feats)):
+            print(f'feats[{i}].shape: {feats[i].shape}')
+        exit()
         return dict(
             queries=self.query_embed.weight.repeat(bs, 1, 1),
             feats=feats,

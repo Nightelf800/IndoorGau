@@ -1,0 +1,27 @@
+# @package _global_
+
+model:
+  type: SymphoniesDinov3
+  embed_dims: 128
+  num_layers: 3
+  view_scales: [4, 8, 16]
+  # pc_range: [-2, 0, -1, 2, 4, 1]
+  # pc_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] 
+
+  depth:
+    depth_model: None
+    depth_model_name: zoedepth
+    depth_pretrained_resource: local::./checkpoints/depth_anything_metric_depth_indoor.pt
+    depth_dataset: nyu
+
+  encoder:
+    type: Dinov3Encoder
+    model_name: dinov3_vitb16
+    checkpoint_path: ./checkpoints/dino/dinov3_vitb16_pretrain_lvd1689m.pth
+  
+  criterions: [ce_ssc, sem_scal, geo_scal, frustum]
+
+optimizer:
+  paramwise_cfg:
+    - name: encoder.model
+      lr_mult: 0.1

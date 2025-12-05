@@ -9,12 +9,9 @@ from ... import build_from_configs
 from .. import encoders
 from ..decoders import SymphoniesDecoder, SymphoniesDecoderMultiBS
 from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss
-# from depth_eval.depth_anything.dpt import DepthAnything
-from depth_eval.zoedepth.utils.config import get_config
-from depth_eval.zoedepth.models.builder import build_model
 import pickle
 
-class Symphonies(nn.Module):
+class SymphoniesDinov2(nn.Module):
 
     def __init__(
         self,
@@ -26,6 +23,7 @@ class Symphonies(nn.Module):
         num_classes,
         num_layers=3,
         image_shape=(370, 1220),
+        scale_factor=1,
         pc_range=[0, 0, 0, 0, 0, 0],
         voxel_size=0.2,
         downsample_z=2,
@@ -37,11 +35,12 @@ class Symphonies(nn.Module):
         super().__init__()
         self.volume_scale = volume_scale
         self.num_classes = num_classes
+        self.scale_factor = scale_factor
         self.class_weights = class_weights
         self.criterions = criterions
 
         self.encoder = build_from_configs(
-            encoders, encoder, embed_dims=embed_dims, scales=view_scales)
+            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor)
         # self.decoder = SymphoniesDecoder(
         #     embed_dims,
         #     num_classes,
@@ -49,7 +48,7 @@ class Symphonies(nn.Module):
         #     num_levels=len(view_scales),
         #     scene_shape=scene_size,
         #     project_scale=volume_scale,
-        #     image_shape=image_shape,
+        #     image_shape=tuple(x * scale_factor for x in image_shape),
         #     voxel_size=voxel_size,
         #     pc_range = pc_range,
         #     downsample_z=downsample_z)
@@ -66,15 +65,6 @@ class Symphonies(nn.Module):
             pc_range = pc_range,
             downsample_z=downsample_z,
         )
-
-        # depth_eval
-        # self.depth_model = depth['depth_model']
-        # if depth['depth_model'] == 'depthanything':
-        #     # self.depth_eval_model = DepthAnything.from_pretrained('LiheYoung/depth_anything_{}14'.format(depth_encoder)).eval()
-
-        #     overwrite = {**kwargs, "pretrained_resource": depth['depth_pretrained_resource']} if depth['depth_pretrained_resource'] else kwargs
-        #     config = get_config(depth['depth_model_name'], "eval", depth['depth_dataset'], **overwrite)
-        #     self.depth_eval_model = build_model(config)
 
     def forward(self, inputs):
         if inputs['img'].dim() == 3:
@@ -129,7 +119,7 @@ class Symphonies(nn.Module):
 
 
 
-        pred_insts = self.encoder(inputs['img'])
+        pred_insts = self.encoder(inputs['img'], inputs['scaleup_img'])
 
         # print(f'-------pred insts----------')
         # for key in pred_insts.keys():
@@ -143,6 +133,8 @@ class Symphonies(nn.Module):
         #             print(f'key: {key}[{i}], shape: {pred_insts[key][i].shape}')
         #     else:
         #         print(f'key: {key}, shape: {pred_insts[key].shape}')
+
+        # exit()
 
 
 

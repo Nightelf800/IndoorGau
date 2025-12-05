@@ -13,11 +13,8 @@ regex
 # numba==0.59
 # scikit-image==0.23.2
 numpy==1.26.1
-transformers==4.45.0
+transformers==4.56.0
 # vtk==9.0.1
 # mayavi==4.7.3
 # xvfbwrapper
 # pyqt5
-
-## CATANET
-# deepspeed==0.12.2

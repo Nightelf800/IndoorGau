@@ -139,4 +139,5 @@ work_dirs/
 .vscode/
 checkpoints/
 ./data/*
+./third_party/*
 

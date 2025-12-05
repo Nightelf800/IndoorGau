@@ -141,9 +141,9 @@ class SymphoniesDecoder(nn.Module):
         self.scene_embed = nn.Embedding(self.num_queries, embed_dims)
         self.scene_pos = LearnableSqueezePositionalEncoding((scene_shape[0] // 2,
                                                              scene_shape[1] // 2,
-                                                             scene_shape[2] // 5),
+                                                             scene_shape[2] // 2),
                                                             embed_dims,
-                                                            squeeze_dims=(2, 2, 5))
+                                                            squeeze_dims=(2, 2, 2))
 
         image_grid = generate_grid(image_shape)
         image_grid = torch.flip(image_grid, dims=[0]).unsqueeze(0)  # 2(wh), h, w

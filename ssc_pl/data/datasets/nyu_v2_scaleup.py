@@ -1,6 +1,6 @@
 import os.path as osp
 import glob
-
+import os
 import cv2
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ BICUBIC = InterpolationMode.BICUBIC
 # from featup.train_jbu_upsampler import JBUFeatUp
 
 # ckpt_path = '/share/lkl/Symphonies/outputs/11_19_dim64_sym/e25_miou0.2860.ckpt'
-class NYUv2(Dataset):
+class NYUv2ScaleUp(Dataset):
 
     META_INFO = {
         'class_weights':
@@ -30,9 +30,10 @@ class NYUv2(Dataset):
                         'table', 'tvs', 'furn', 'objs'),
     }
 
-    def __init__(self, split, data_root, label_root, voxel_size=0.08, pc_range=None, depth_root=None,
+    def __init__(self, split, data_root, data_scaleup_root, label_root, voxel_size=0.08, pc_range=None, depth_root=None,
                  use_crop=True, frustum_size=4, use_depth_eval=False, depth_encoder='null', use_tsdf=False):
         self.data_root = osp.join(data_root, 'NYU' + split)
+        self.data_scaleup_root = osp.join(data_scaleup_root, 'NYU' + split)
         self.label_root = osp.join(label_root, 'NYU' + split)
         self.depth_root = osp.join(depth_root, 'NYU' + split) if depth_root else None
         self.use_depth_eval = use_depth_eval
@@ -57,8 +58,12 @@ class NYUv2(Dataset):
         self.scene_size = (4.8, 4.8, 2.88)  # meters
         # self.scene_size = (4, 4, 2)  # meters
         self.pc_range = np.array(pc_range, dtype=np.float64)
-        self.img_shape =  (640, 480)
-        self.cam_K = np.array(((518.8579, 0, 320), (0, 518.8579, 240), (0, 0, 1)))
+        self.img_shape =  (640, 480) 
+        cam_intrin = np.array(((518.8579, 0, 320), (0, 518.8579, 240), (0, 0, 1)))
+        # cam_intrin[0] *= self.scale_factor
+        # cam_intrin[1] *= self.scale_factor
+        self.cam_K = cam_intrin
+
 
         self.scan_names = glob.glob(osp.join(self.data_root, '*.bin'))
         print(f'NYUv2 {split} dataset has {len(self.scan_names)} samples')
@@ -67,8 +72,6 @@ class NYUv2(Dataset):
             T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
-        xyz = get_meshgrid([0, 0, 0, 4, 4, 2], self.voxel_size)
-        self.xyz = np.concatenate([xyz, np.ones_like(xyz[..., :1])], axis=-1) # x, y, z, 4
 
         # self.depth_eval_transform = T.Compose([Resize(
         #     width=518,
@@ -127,7 +130,6 @@ class NYUv2(Dataset):
             # [100, 100, 50] 缩放
             target = data.pop('target_1_1').transpose(0, 2, 1)
 
-        data['xyz'] = self.xyz[..., :3] + voxel_origin + self.voxel_size * 0.5
         label['target'] = target
         target_1_4 = data.pop('target_1_16').transpose(0, 2, 1)
 
@@ -163,28 +165,32 @@ class NYUv2(Dataset):
         label['frustums_class_dists'] = frustums_class_dists
 
         img_path = osp.join(self.data_root, filename + '_color.jpg')
+        if not os.path.exists(img_path):
+            img_path = osp.join(self.data_root, filename + '_color.png')
         img = Image.open(img_path).convert('RGB')
-        img = img.resize(((640, 480)))
-        # device = torch.device('cuda')
-        # transform = T.Compose([T.Resize((432, 768)), T.ToTensor(), norm])
-        # img_tensor = transform(img).unsqueeze(0).to(device)
-        # with torch.no_grad():
-        #         hr_feats = upsampler(image_tensor)
-        # import pdb;
-        # pdb.set_trace()
+        img = img.resize(self.img_shape)
         img = np.asarray(img, dtype=np.float32) / 255.0
-
         data['img'] = self.transforms(img)  # (3, H, W)
         # data['img'] = self.depth_eval_transform({'image': img})['image']  # (3, H, W)
+
+        scaleup_img_path = osp.join(self.data_scaleup_root, filename + '_color.jpg')
+        if not os.path.exists(scaleup_img_path):
+            scaleup_img_path = osp.join(self.data_scaleup_root, filename + '_color.png')
+        scaleup_img = Image.open(scaleup_img_path).convert('RGB')
+        scaleup_img = np.asarray(scaleup_img, dtype=np.float32) / 255.0
+        data['scaleup_img'] = self.transforms(scaleup_img)  # (3, H, W)
 
 
         if self.depth_root is not None:
             if self.use_depth_eval is False:
                 data['use_depth_eval'] = False
                 depth_path = osp.join(self.depth_root, filename + '.png')
+                # 明确以灰度模式打开深度图，确保它是单通道
                 depth = Image.open(depth_path)
-                depth = depth.resize(((640, 480)))
-                data['depth'] = np.array(depth) / 8000.  # noqa
+                depth = depth.resize(self.img_shape)
+                # 确保转换为numpy数组后是单通道格式
+                depth_np = np.array(depth) / 8000.  # noqa
+                data['depth'] = depth_np
             else:
                 data['use_depth_eval'] = True
                 # 本地加载深度数据集，若使用模型直接推理，请注释这段代码

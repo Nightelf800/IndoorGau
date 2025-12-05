@@ -105,6 +105,7 @@ def nchw_to_nlc(x):
 
 
 def pix2cam(p_pix, depth, K):
+
     p_pix = torch.cat([p_pix * depth, depth], dim=1)  # bs, 3, h, w
     return K.inverse() @ p_pix.flatten(2)
 

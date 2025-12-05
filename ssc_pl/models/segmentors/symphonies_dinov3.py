@@ -14,7 +14,7 @@ from depth_eval.zoedepth.utils.config import get_config
 from depth_eval.zoedepth.models.builder import build_model
 import pickle
 
-class Symphonies(nn.Module):
+class SymphoniesDinov3(nn.Module):
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class Symphonies(nn.Module):
         self.criterions = criterions
 
         self.encoder = build_from_configs(
-            encoders, encoder, embed_dims=embed_dims, scales=view_scales)
+            encoders, encoder, in_channels=768, embed_dims=embed_dims, use_clstoken=True)
         # self.decoder = SymphoniesDecoder(
         #     embed_dims,
         #     num_classes,
@@ -66,15 +66,6 @@ class Symphonies(nn.Module):
             pc_range = pc_range,
             downsample_z=downsample_z,
         )
-
-        # depth_eval
-        # self.depth_model = depth['depth_model']
-        # if depth['depth_model'] == 'depthanything':
-        #     # self.depth_eval_model = DepthAnything.from_pretrained('LiheYoung/depth_anything_{}14'.format(depth_encoder)).eval()
-
-        #     overwrite = {**kwargs, "pretrained_resource": depth['depth_pretrained_resource']} if depth['depth_pretrained_resource'] else kwargs
-        #     config = get_config(depth['depth_model_name'], "eval", depth['depth_dataset'], **overwrite)
-        #     self.depth_eval_model = build_model(config)
 
     def forward(self, inputs):
         if inputs['img'].dim() == 3:
