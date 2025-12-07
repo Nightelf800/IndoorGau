@@ -1,6 +1,4 @@
 from importlib import import_module
-
-from third_party.dinov3.dinov3.layers.fp8_linear import scale
 import torch
 import torch.nn as nn
 import sys

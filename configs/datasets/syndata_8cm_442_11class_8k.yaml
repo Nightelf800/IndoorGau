@@ -15,7 +15,7 @@ data:
     frustum_size: 8
     num_classes: 11
   loader:
-    batch_size: 1  # batch size per GPU
+    batch_size: 2  # batch size per GPU
     num_workers: 4
 
 model:

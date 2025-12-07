@@ -261,7 +261,7 @@ class SymphoniesDecoderMultiBS(nn.Module):
                                               ref_2d, ref_3d, ref_vox, fov_mask)
             if i == 2:
                 scene_embed = self.aspp(scene_embed)
-            if i == len(self.layers) - 1:
+            if self.training or i == len(self.layers) - 1:
                 outs.append(self.cls_head(scene_embed))
 
             if self.use_hvm:
