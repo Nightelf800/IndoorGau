@@ -1,0 +1,19 @@
+# @package _global_
+
+optimizer:
+  type: SGD
+  lr: 2e-4
+  momentum : 0.9  # for fp16
+  weight_decay: 1.0e-4
+  # paramwise_cfg:
+  #   - name: backbone
+  #     lr_mult: 0.1
+scheduler:
+  type: CyclicLR
+  base_lr : 1e-4
+  max_lr : 2e-4
+
+trainer:
+  max_epochs: 30
+  log_every_n_steps: 20
+  # gradient_clip_val: 35.0

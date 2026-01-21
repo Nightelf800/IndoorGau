@@ -8,141 +8,74 @@ from transformers import AutoModel, AutoConfig
 
 from ... import build_from_configs
 from .. import encoders
+from ..fusion import VisualLanguageFusion, VisualLanguageFusion3D, VLFusionAttLayers
 from ..decoders import SymphoniesDecoder, SymphoniesDecoderMultiBS
-from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss
+from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss, hvm_ce_ssc_loss
 import pickle
 
 
-class CustomTextEncoder(nn.Module):
+class Qwen2RotaryEmbedding(nn.Module):
     """
-    自定义文本编码器，不依赖外部预训练权重
-    结构与Qwen2.5兼容，但参数更少
+    Qwen2的旋转位置编码实现
     """
-    def __init__(self, vocab_size=151936, embed_dims=4096, max_length=128, num_layers=8, num_heads=16):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
-        self.embed_dims = embed_dims
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
         
-        # 词嵌入层
-        self.embedding = nn.Embedding(vocab_size, embed_dims)
+        # 计算旋转矩阵系数
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         
-        # 位置编码
-        self.position_embedding = nn.Parameter(torch.zeros(1, max_length, embed_dims))
-        
-        # Transformer编码器层
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dims,
-            nhead=num_heads,
-            dim_feedforward=embed_dims * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # LayerNorm
-        self.layer_norm = nn.LayerNorm(embed_dims)
-        
-    def forward(self, input_ids, attention_mask=None):
+        # 计算位置编码矩阵
+        self._compute_cos_sin_tables(max_position_embeddings)
+    
+    def _compute_cos_sin_tables(self, max_pos):
+        """计算余弦和正弦表"""
+        positions = torch.arange(0, max_pos, dtype=torch.float32, device=self.inv_freq.device)
+        # 计算频率
+        freqs = torch.outer(positions, self.inv_freq)
+        # 计算cos和sin值
+        cos = freqs.cos().unsqueeze(1)
+        sin = freqs.sin().unsqueeze(1)
+        # 重复以便应用到所有维度
+        # cos形状为[max_pos, 1, dim//2]，需要在最后一个维度重复
+        cos = cos.repeat(1, 1, 2)
+        sin = sin.repeat(1, 1, 2)
+        # 存储为缓冲区
+        self.register_buffer("cos_table", cos, persistent=False)
+        self.register_buffer("sin_table", sin, persistent=False)
+    
+    def forward(self, x, positions=None):
         """
-        前向传播
+        应用旋转位置编码
         
         参数：
-            input_ids: 输入token IDs，形状为 [batch_size, seq_len]
-            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
+            x: 输入张量，形状为 [batch_size, seq_len, dim]
+            positions: 可选，位置索引
             
         返回：
-            output: 包含last_hidden_state的对象
+            应用旋转编码后的张量
         """
-        # 嵌入层
-        embeddings = self.embedding(input_ids) + self.position_embedding[:, :input_ids.size(1), :]
-        embeddings = self.layer_norm(embeddings)
+        batch_size, seq_len, dim = x.shape
         
-        # 计算注意力掩码
-        src_key_padding_mask = None
-        if attention_mask is not None:
-            # 使用attention_mask作为src_key_padding_mask（batch_size, seq_len）
-            src_key_padding_mask = (attention_mask == 0)  # 转换为True表示需要遮挡的位置
+        if positions is None:
+            positions = torch.arange(seq_len, device=x.device)
         
-        # Transformer编码
-        # 注意：PyTorch Transformer的forward方法中，mask参数是src_mask，
-        # 而src_key_padding_mask是用于标记填充位置的掩码
-        last_hidden_state = self.transformer(embeddings, src_key_padding_mask=src_key_padding_mask)
+        # 获取对应的cos和sin值
+        # cos_table形状为[max_pos, 1, dim]，选择positions后变为[seq_len, 1, dim]
+        # 需要将形状调整为[seq_len, dim]以便与输入张量广播
+        cos = self.cos_table[positions].squeeze(1)  # [seq_len, dim]
+        sin = self.sin_table[positions].squeeze(1)  # [seq_len, dim]
         
-        # 返回与预训练模型兼容的输出格式
-        class Output:
-            def __init__(self, last_hidden_state):
-                self.last_hidden_state = last_hidden_state
-                
-        return Output(last_hidden_state)
+        # 对x进行旋转编码
+        x_rotated = torch.stack([-x[..., 1::2], x[..., ::2]], dim=-1).view_as(x)
+        x = x * cos + x_rotated * sin
+        
+        return x
 
 
-class VisualLanguageFusion(nn.Module):
-    """
-    视觉-语言融合模块，使用注意力机制融合两种模态的特征
-    """
-    def __init__(self, img_embed_dims, text_embed_dims, output_dims):
-        super().__init__()
-        self.img_embed_dims = img_embed_dims
-        self.text_embed_dims = text_embed_dims
-        self.output_dims = output_dims
-        
-        # 文本特征投影到与图像特征相同的维度
-        self.text_projection = nn.Linear(text_embed_dims, img_embed_dims)
-        
-        # 视觉-语言注意力层
-        self.attention = nn.MultiheadAttention(
-            embed_dim=img_embed_dims,
-            num_heads=8,
-            batch_first=True
-        )
-        
-        # 输出投影层
-        self.output_projection = nn.Linear(img_embed_dims, output_dims)
-        
-        # 残差连接和归一化
-        self.norm1 = nn.LayerNorm(img_embed_dims)
-        self.norm2 = nn.LayerNorm(output_dims)
-        self.dropout = nn.Dropout(0.1)
-        
-    def forward(self, img_features, text_features, text_attention_mask=None):
-        """
-        前向传播
-        
-        参数：
-            img_features: 图像特征，形状为 [batch_size, num_patches, img_embed_dims]
-            text_features: 文本特征，形状为 [batch_size, seq_len, text_embed_dims]
-            text_attention_mask: 文本注意力掩码，形状为 [batch_size, seq_len]
-            
-        返回：
-            fused_features: 融合后的特征，形状为 [batch_size, num_patches, output_dims]
-        """
-        # 投影文本特征
-        projected_text = self.text_projection(text_features)
-        
-        # 计算注意力掩码（如果提供）
-        if text_attention_mask is not None:
-            # 转换为多头注意力需要的形状 [batch_size, num_heads, num_patches, seq_len]
-            # 但 MultiheadAttention 期望的是 [batch_size, seq_len] 形状的 key_padding_mask
-            # key_padding_mask 中 1 表示需要被忽略的位置
-            key_padding_mask = ~text_attention_mask.bool()
-        else:
-            key_padding_mask = None
-        
-        # 应用注意力机制
-        # img_features 作为 query，projected_text 作为 key 和 value
-        attended_features, _ = self.attention(
-            query=img_features,
-            key=projected_text,
-            value=projected_text,
-            key_padding_mask=key_padding_mask
-        )
-        
-        # 残差连接和归一化
-        img_features = self.norm1(img_features + self.dropout(attended_features))
-        
-        # 输出投影
-        fused_features = self.output_projection(img_features)
-        fused_features = self.norm2(fused_features)
-        
-        return fused_features
 
 class SymphoniesDinov2VL(nn.Module):
 
@@ -154,13 +87,17 @@ class SymphoniesDinov2VL(nn.Module):
         view_scales,
         volume_scale,
         num_classes,
-        text_model_name=None,
+        text_vocab_size=151936,  # Qwen2.5的词汇表大小
+        text_embed_dims=1024,     # 文本嵌入维度
+        max_text_length=256,      # 最大文本长度
+        fusion_type='att',  # 'original' or '3d' or 'att'
         num_layers=3,
         image_shape=(370, 1220),
         scale_factor=1,
         pc_range=[0, 0, 0, 0, 0, 0],
         voxel_size=0.2,
         downsample_z=2,
+        use_hvm=False,
         class_weights=None,
         criterions=None,
         depth=None,
@@ -172,54 +109,47 @@ class SymphoniesDinov2VL(nn.Module):
         self.scale_factor = scale_factor
         self.class_weights = class_weights
         self.criterions = criterions
+        self.use_hvm = use_hvm
         
-        if text_model_name == "Qwen2.5-0.5B-Instruct":
-            # 使用轻量级的Qwen2.5模型替代7B版本
-            self.text_encoder = AutoModel.from_pretrained(
-                "checkpoints/Qwen2.5-0.5B-Instruct",  # 只有0.5B参数，下载很快
-                trust_remote_code=True,
-                output_hidden_states=True
-            )
-            # 冻结文本编码器的参数（可选）
-            for param in self.text_encoder.parameters():
-                param.requires_grad = False
-            self.text_embed_dims = self.text_encoder.config.hidden_size
+        # 定义文本嵌入层
+        self.text_embedding = nn.Embedding(text_vocab_size, text_embed_dims)
         
-        elif text_model_name == "Qwen2.5-7B-Instruct":
-            # 使用Qwen2.5-7B-Instruct模型
-            self.text_encoder = AutoModel.from_pretrained(
-                "Qwen/Qwen2.5-7B-Instruct", 
-                trust_remote_code=True,
-                output_hidden_states=True
-            )
-            # 冻结文本编码器的参数（可选）
-            for param in self.text_encoder.parameters():
-                param.requires_grad = False
-            self.text_embed_dims = self.text_encoder.config.hidden_size
-
-        else:
-            print(f"unsupported text_model_name: {text_model_name}, use custom text encoder instead")
-            # 使用自定义文本编码器，无需下载任何权重
-            self.text_encoder = CustomTextEncoder(
-                vocab_size=151936,  # Qwen2.5的词汇表大小
-                embed_dims=4096,     # 与Qwen2.5-7B兼容的嵌入维度
-                max_length=128,      # 根据需要调整
-                num_layers=8,        # 层数，可根据需要调整
-                num_heads=16         # 注意力头数，可根据需要调整
-            )
-            self.text_embed_dims = self.text_encoder.embed_dims
+        # 定义Qwen2旋转位置编码
+        self.rotary_embedding = Qwen2RotaryEmbedding(
+            dim=text_embed_dims,
+            max_position_embeddings=max_text_length
+        )
+        
+        # 文本嵌入维度
+        self.text_embed_dims = text_embed_dims
         
 
         # 初始化图像编码器
         self.img_encoder = build_from_configs(
-            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor)
+            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor, text_embed_dims=text_embed_dims)
 
         # 初始化视觉-语言融合模块
-        self.vl_fuse = VisualLanguageFusion(
-            img_embed_dims=embed_dims,
-            text_embed_dims=self.text_embed_dims,
-            output_dims=embed_dims
-        )
+        # if fusion_type == '3d':
+        #     print("Using VisualLanguageFusion3D module...")
+        #     self.vl_fuse = VisualLanguageFusion3D(
+        #         img_embed_dims=embed_dims,
+        #         text_embed_dims=self.text_embed_dims,
+        #         output_dims=embed_dims
+        #     )
+        # elif fusion_type == 'att':
+        #     print("Using VLFusion Attention Layers...")
+        #     self.vl_fuse = VLFusionAttLayers(
+        #         img_embed_dims=embed_dims,
+        #         text_embed_dims=self.text_embed_dims
+        #     )
+
+        # else:
+        #     print("Using original VisualLanguageFusion module...")
+        #     self.vl_fuse = VisualLanguageFusion(
+        #         img_embed_dims=embed_dims,
+        #         text_embed_dims=self.text_embed_dims,
+        #         output_dims=embed_dims
+        #     )
         # self.decoder = SymphoniesDecoder(
         #     embed_dims,
         #     num_classes,
@@ -243,6 +173,7 @@ class SymphoniesDinov2VL(nn.Module):
             voxel_size=voxel_size,
             pc_range = pc_range,
             downsample_z=downsample_z,
+            use_hvm=use_hvm,
         )
 
     def forward(self, inputs):
@@ -300,49 +231,56 @@ class SymphoniesDinov2VL(nn.Module):
         token_ids = inputs['token_ids']
         attention_mask = inputs['attention_mask']
         
-        # 获取文本特征
-        text_outputs = self.text_encoder(
-            input_ids=token_ids,
-            attention_mask=attention_mask
-        )
-        # print(f'text_outputs.last_hidden_state.shape: {text_outputs.last_hidden_state.shape}')
-        # 使用最后一层隐藏状态作为文本特征
-        text_embeds = text_outputs.last_hidden_state  # [batch_size, seq_len, text_embed_dims]
-        # 可以考虑使用CLS token特征
-        # text_embeds = text_outputs.last_hidden_state[:, 0, :]  # [batch_size, text_embed_dims]
-        
+        # 直接将token_ids通过embedding层编码
+        # print(f'token_ids.shape: {token_ids.shape}')
+        text_embeds = self.text_embedding(token_ids)  # [batch_size, seq_len, text_embed_dims]
+        # print(f'text_embeds.shape: {text_embeds.shape}')
+        # 应用Qwen2旋转位置编码
+        text_embeds = self.rotary_embedding(text_embeds)  # [batch_size, seq_len, text_embed_dims]
+        # print(f'text_embeds.shape: {text_embeds.shape}')
+        # 注意：这里我们不再需要复杂的transformer编码器，直接使用embedding+旋转编码的结果
         # 图像编码（保持不变）
-        pred_insts = self.img_encoder(inputs['img'], inputs['scaleup_img'])
+        pred_insts = self.img_encoder(inputs['img'], scaleup_imgs=inputs['scaleup_img'], text_embeds=text_embeds, attention_mask=attention_mask)
         
         # 提取图像特征
         pred_masks = pred_insts.pop('pred_masks', None)
         feats = pred_insts.pop('feats')
+
+        # for i, feat in enumerate(feats):
+        #     print(f'img_feat_{i}.shape: {feat.shape}')
         
         # 融合视觉和语言特征
         # 假设 feats 是一个列表，其中包含不同尺度的图像特征
-        fused_feats = []
-        for img_feat in feats:
+        # fused_feats = []
+        # for i, img_feat in enumerate(feats):
             # 调整特征形状以适应注意力计算
             # img_feat 形状通常为 [batch_size, img_embed_dims, H, W]
-            batch_size, embed_dim, H, W = img_feat.shape
+            # batch_size, embed_dim, H, W = img_feat.shape
             
             # 转换为 [batch_size, num_patches, img_embed_dims]
-            img_feat_reshaped = img_feat.view(batch_size, embed_dim, -1).permute(0, 2, 1)
+            # img_feat_reshaped = img_feat.view(batch_size, embed_dim, -1).permute(0, 2, 1)
             
             # 应用融合模块
-            fused_feat = self.vl_fuse(
-                img_features=img_feat_reshaped,
-                text_features=text_embeds,
-                text_attention_mask=attention_mask
-            )
-            
+            # if i == len(feats) - 1:
+            #     fused_feat = self.vl_fuse(
+            #         img_features=img_feat,
+            #         text_features=text_embeds,
+            #         text_attention_mask=attention_mask
+            #     )
+            #     fused_feats.append(fused_feat)
+            # else:
+            #     fused_feats.append(img_feat)
             # 转换回原始形状 [batch_size, img_embed_dims, H, W]
-            fused_feat_reshaped = fused_feat.permute(0, 2, 1).view(batch_size, embed_dim, H, W)
+            # fused_feat_reshaped = fused_feat.permute(0, 2, 1).view(batch_size, embed_dim, H, W)
             # print(f'fused_feat_reshaped.shape: {fused_feat_reshaped.shape}')
-            fused_feats.append(fused_feat_reshaped)
+            
         
         # 使用融合后的特征替换原始特征
-        feats = fused_feats
+        # feats = fused_feats
+
+        # for i, fused_feat in enumerate(fused_feats):
+        #     print(f'fused_feat_{i}.shape: {fused_feat.shape}')
+
 
         depth, K, E, voxel_origin, projected_pix, fov_mask = list(
             map(lambda k: inputs[k],
@@ -350,19 +288,34 @@ class SymphoniesDinov2VL(nn.Module):
                  f'fov_mask_{self.volume_scale}')))
         
 
-        outs = self.decoder(
-            pred_insts,
-            feats,
-            pred_masks,
-            depth,
-            K,
-            E,
-            voxel_origin,
-            projected_pix,
-            fov_mask
-        )
+        if self.use_hvm:
+            outs, hvm_out_dict, hvm_out_dict_pre, hvm_outs_list = self.decoder(
+                pred_insts,
+                feats,
+                pred_masks,
+                depth,
+                K,
+                E,
+                voxel_origin,
+                projected_pix,
+                fov_mask
+            )
+
+            return {'ssc_logits': outs[-1], 'aux_outputs': outs, 'hvm_out_dict': hvm_out_dict, 'hvm_out_dict_pre': hvm_out_dict_pre, 'hvm_outs_list': hvm_outs_list}
+        else:
+            outs = self.decoder(
+                pred_insts,
+                feats,
+                pred_masks,
+                depth,
+                K,
+                E,
+                voxel_origin,
+                projected_pix,
+                fov_mask
+            )
         
-        return {'ssc_logits': outs[-1], 'aux_outputs': outs}
+            return {'ssc_logits': outs[-1], 'aux_outputs': outs}
 
     def depth_infer(self, model, images, **kwargs):
         """Inference with flip augmentation"""
@@ -395,7 +348,12 @@ class SymphoniesDinov2VL(nn.Module):
             'ce_ssc': ce_ssc_loss,
             'sem_scal': sem_scal_loss,
             'geo_scal': geo_scal_loss,
-            'frustum': frustum_proportion_loss
+            'frustum': frustum_proportion_loss,
+            
+        }
+
+        loss_map_extra = {
+            'hvm_ce_ssc': hvm_ce_ssc_loss
         }
 
         # print(f'class_weights: {self.class_weights}')
@@ -406,6 +364,8 @@ class SymphoniesDinov2VL(nn.Module):
             for i, pred in enumerate(preds['aux_outputs']):
                 scale = 1 if i == len(preds['aux_outputs']) - 1 else 0.5
                 for loss in self.criterions:
+                    if loss not in loss_map:
+                        continue
                     losses['loss_' + loss + '_' + str(i)] = loss_map[loss]({
                         'ssc_logits': pred
                     }, target) * scale
@@ -413,4 +373,8 @@ class SymphoniesDinov2VL(nn.Module):
             for loss in self.criterions:
                 losses['loss_' + loss] = 0
                 # losses['loss_' + loss] = loss_map[loss](preds, target)
+        if 'hvm_out_dict' in preds:
+            for loss in self.criterions:
+                if loss == 'hvm_ce_ssc':
+                    losses['loss_' + loss] = loss_map_extra[loss](preds, target)
         return losses

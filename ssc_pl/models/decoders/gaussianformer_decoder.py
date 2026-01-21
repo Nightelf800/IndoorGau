@@ -13,9 +13,7 @@ from gaussianformer.model.head import GaussianRenderHead
 # from GaussianOcc.utils import render
 import numpy as np
 import torch
-from ..utils import rasterize_gaussians, prepare_gs_attribute, setup_opengl_proj
-import time
-from gsplat import rasterization
+from ..utils import prepare_gs_attribute, setup_opengl_proj
 
 SIGMOID_MAX = 9.21024
 LOGIT_MAX = 0.9999
@@ -71,7 +69,6 @@ class GaussianFormerDecoder(nn.Module):
         self.opt = None
 
     def forward(self, metas=None, points=None, ms_img_feats=None, voxel_feat=None, pca_matrix=None):
-        # TODO: The following is only devised for the GauusianFormer implementation.
 
         results = {
             'metas': metas,
@@ -169,8 +166,13 @@ class GaussianFormerDecoder(nn.Module):
 
         # outs = self.render_head(**results)
         # results.update(outs)
-
-        outs = self.model.head(**results)
+        if self.model.head_render is not None:
+            render_outs = self.model.head_render(**results)
+            results.update(render_outs)
+        if self.model.head_occ is not None:
+            occ_outs = self.model.head_occ(**results)
+            results.update(occ_outs)
+        
         # print(f'outs.keys: {outs.keys()}')
         # for i in range(len(outs['pred_occ'])):
         #     print('model.head.pred_occ', torch.isnan(outs['pred_occ'][i]).any())   # 检查 model.head.pred_occ 是否有 NaN
@@ -182,5 +184,5 @@ class GaussianFormerDecoder(nn.Module):
         # print('model.head.occ_mask', torch.isnan(outs['occ_mask']).any())   # 检查 model.head.occ_mask 是否有 NaN
         # print('model.head.occ_mask', torch.isinf(outs['occ_mask']).any())   # 检查 model.head.occ_mask 是否有 Inf
         # print('outs[occ_mask].shape: {}'.format(outs['occ_mask'].shape))
-        results.update(outs)
+        
         return results

@@ -1,0 +1,319 @@
+import os
+import os.path as osp
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from mmdet3d.registry import MODELS
+from mmdet.models import inverse_sigmoid
+
+from .gsplat_rasterization import rasterize_gaussians
+from .gaussian_voxelizer import GaussianVoxelizer
+from ..utils import (OCC3D_CATEGORIES, cam2world, flatten_bsn_forward,
+                    get_covariance, rotmat_to_quat)
+
+
+class MLP(nn.Module):
+
+    def __init__(self,
+                 input_dim,
+                 hidden_dim=None,
+                 output_dim=None,
+                 num_layers=2,
+                 activation='relu',
+                 mode=None,
+                 range=None):
+        super().__init__()
+        hidden_dim = hidden_dim or input_dim * 4
+        output_dim = output_dim or input_dim
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.activation = activation
+        self.range = range
+        self.mode = mode
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = getattr(F, self.activation)(
+                layer(x)) if i < self.num_layers - 1 else layer(x)
+
+        if self.mode is not None:
+            if self.mode == 'sigmoid':
+                x = F.sigmoid(x)
+            if self.range is not None:
+                x = self.range[0] + (self.range[1] - self.range[0]) * x
+        return x
+
+
+def prompt_denoising(logits, logit_scale=100, pd_threshold=0.1):
+    probs = logits.softmax(-1)
+    probs_ = F.softmax(logits * logit_scale, -1)
+    max_cls_conf = probs_.flatten(1, 3).max(1).values
+    selected_cls = (max_cls_conf < pd_threshold)[:, None, None,
+                                                 None].expand(*probs.shape)
+    probs[selected_cls] = 0
+    return probs
+
+
+def merge_probs(probs, categories):
+    merged_probs = []
+    i = 0
+    for cats in categories:
+        p = probs[..., i:i + len(cats)]
+        i += len(cats)
+        if len(cats) > 1:
+            p = p.max(-1, keepdim=True).values
+        merged_probs.append(p)
+    return torch.cat(merged_probs, dim=-1)
+
+
+class GaussTRHead(nn.Module):
+
+    def __init__(self,
+                 embed_dims,
+                 reduce_dims,
+                 image_shape,
+                 vol_range,
+                 voxel_size,
+                 segment_head=None,
+                 depth_limit=51.2,
+                 projection=None,
+                 text_protos=None,
+                 prompt_denoising=True):
+        super().__init__()
+        self.opacity_head = MLP(embed_dims, output_dim=1, mode='sigmoid')
+        self.feature_head = MLP(embed_dims, output_dim=embed_dims)
+        self.scale_head = MLP(embed_dims, output_dim=3, mode='sigmoid', range=(1, 16))
+        self.regress_head = MLP(embed_dims, output_dim=3)
+        self.segment_head = MLP(reduce_dims, output_dim=12)
+
+        self.reduce_dims = reduce_dims
+        self.image_shape = image_shape
+        # self.patch_size = patch_size
+        self.depth_limit = depth_limit
+        self.prompt_denoising = prompt_denoising
+
+        if projection is not None:
+            self.projection = MODELS.build(projection)
+            if 'init_cfg' in projection and projection.init_cfg.type == 'Pretrained':
+                self.projection.requires_grad_(False)
+        if text_protos is not None:
+            self.register_buffer('text_proto_embeds',
+                                 torch.load(text_protos, map_location='cpu'))
+
+        self.voxelizer = GaussianVoxelizer(vol_range, voxel_size)
+
+    def forward(self,
+                x,
+                ref_pts,
+                depth,
+                cam2img,
+                cam2ego,
+                mode='tensor',
+                feats=None,
+                img_aug_mat=None,
+                sem_segs=None,
+                **kwargs):
+        # import pdb; pdb.set_trace()
+        bs = x.shape[0]
+        # x的形状是[bs, num_queries, embed_dims]，不需要基于cam2img重塑
+        
+        deltas = self.regress_head(x)
+        ref_pts = (
+            deltas[..., :2] +
+            inverse_sigmoid(ref_pts.reshape(*x.shape[:-1], -1))).sigmoid()
+        depth = depth.clamp(max=self.depth_limit)
+        # 直接处理深度采样，不使用flatten_bsn_forward
+        # 确保depth和ref_pts的批次维度一致
+        bs = depth.shape[0]
+        num_queries = ref_pts.shape[1]
+        
+        # 重塑depth以匹配grid_sample的要求: [bs, channels, height, width]
+        depth_reshaped = depth[:, None, :, :]  # [bs, 1, H, W]
+        
+        # 重塑ref_pts以匹配grid_sample的要求: [bs * num_queries, 1, 1, 2]
+        ref_pts_reshaped = ref_pts.view(bs * num_queries, 1, 1, 2) * 2 - 1
+        
+        # 对每个查询点单独进行grid_sample
+        sample_depth = F.grid_sample(depth_reshaped.expand(bs * num_queries, -1, -1, -1), 
+                                     ref_pts_reshaped, 
+                                     padding_mode='border')
+        
+        # 重塑结果回到原始形状
+        sample_depth = sample_depth.view(bs, num_queries, -1).squeeze(-1).unsqueeze(-1)
+        points = torch.cat([
+            ref_pts * torch.tensor(self.image_shape[::-1]).to(x),
+            sample_depth * (1 + deltas[..., 2:3])
+        ], -1)
+        means3d = cam2world(points, cam2img, cam2ego, img_aug_mat)
+
+        opacities = self.opacity_head(x).float()
+        features = self.feature_head(x).float()
+        scales = self.scale_head(x)
+        # 修复scale_transform方法调用，确保批次维度正确
+        focal = cam2img[..., 0, 0]  # 获取focal长度
+        # 确保focal和sample_depth的批次维度一致
+        if focal.dim() == 2:
+            focal = focal.squeeze(0)  # 如果focal有多余的维度，进行挤压
+        scales = scales * self.scale_transform(sample_depth, focal).clamp(1e-6)
+
+        # 确保cam2ego的形状与scales匹配
+        cam2ego_expanded = cam2ego.unsqueeze(1).expand(-1, scales.shape[1], -1, -1)
+        
+        # 只使用cam2ego的旋转部分（前3行前3列）
+        covariances = flatten_bsn_forward(get_covariance, scales, cam2ego_expanded[..., :3, :3])
+        rotations = flatten_bsn_forward(rotmat_to_quat, cam2ego_expanded[..., :3, :3])
+        rotations = rotations.unsqueeze(2).expand(-1, -1, x.size(2), -1)
+
+        if mode == 'occ':
+            density, grid_feats = self.voxelizer(
+                means3d=means3d.flatten(1, 2),
+                opacities=opacities.flatten(1, 2),
+                features=features.flatten(1, 2).softmax(-1),
+                covariances=covariances.flatten(1, 2))
+            if self.prompt_denoising:
+                probs = prompt_denoising(grid_feats)
+            else:
+                probs = grid_feats.softmax(-1)
+
+            probs = merge_probs(probs, OCC3D_CATEGORIES)
+            preds = probs.argmax(-1)
+            preds = torch.where(density.squeeze(-1) > 4e-2, preds, 12)
+            return preds
+        else:
+            raise ValueError(f'Unknown mode {mode}')
+
+        # tgt_feats = feats.flatten(-2).mT
+        # if hasattr(self, 'projection'):
+        #     tgt_feats = self.projection(tgt_feats)[0]
+
+        # u, s, v = torch.pca_lowrank(
+        #     tgt_feats.flatten(0, 2).double(), q=self.reduce_dims, niter=4)
+        # tgt_feats = tgt_feats @ v.to(tgt_feats)
+        # features = features @ v.to(features)
+        # features = features.float()
+
+        # rendered = rasterize_gaussians(
+        #     means3d.flatten(1, 2),
+        #     features.flatten(1, 2),
+        #     opacities.squeeze(-1).flatten(1, 2),
+        #     scales.flatten(1, 2),
+        #     rotations.flatten(1, 2),
+        #     cam2img,
+        #     cam2ego,
+        #     img_aug_mats=img_aug_mat,
+        #     image_size=(900, 1600),
+        #     near_plane=0.1,
+        #     far_plane=100,
+        #     render_mode='RGB+D',  # NOTE: 'ED' mode is better for visualization
+        #     channel_chunk=32).flatten(0, 1)
+        # rendered_depth = rendered[:, -1]
+        # rendered = rendered[:, :-1]
+
+        # losses = {}
+        # depth = torch.where(depth < self.depth_limit, depth,
+        #                     1e-3).flatten(0, 1)
+        # losses['loss_depth'] = self.depth_loss(rendered_depth, depth)
+        # losses['mae_depth'] = self.depth_loss(
+        #     rendered_depth, depth, criterion='l1')
+
+        # # Interpolating to high resolution for supervision can improve mIoU by 0.7
+        # # compared to average pooling to low resolution.
+        # bsn, c, h, w = rendered.shape
+        # tgt_feats = tgt_feats.mT.reshape(bsn, c, h // self.patch_size,
+        #                                  w // self.patch_size)
+        # tgt_feats = F.interpolate(
+        #     tgt_feats, scale_factor=self.patch_size, mode='bilinear')
+        # rendered = rendered.flatten(2).mT
+        # tgt_feats = tgt_feats.flatten(2).mT.flatten(0, 1)
+        # losses['loss_cosine'] = F.cosine_embedding_loss(
+        #     rendered.flatten(0, 1), tgt_feats, torch.ones_like(
+        #         tgt_feats[:, 0])) * 5
+
+        # if self.segment_head:
+        #     losses['loss_ce'] = F.cross_entropy(
+        #         self.segment_head(rendered).mT,
+        #         sem_segs.flatten(0, 1).flatten(1).long(),
+        #         ignore_index=0)
+        # return losses
+
+    def photometric_error(self, src_imgs, rec_imgs):
+        return (0.85 * self.ssim(src_imgs, rec_imgs) +
+                0.15 * F.l1_loss(src_imgs, rec_imgs))
+
+    def depth_loss(self, pred, target, criterion='silog_l1'):
+        loss = 0
+        if 'silog' in criterion:
+            loss += self.silog_loss(pred, target)
+        if 'l1' in criterion:
+            target = target.flatten()
+            pred = pred.flatten()[target != 0]
+            l1_loss = F.l1_loss(pred, target[target != 0])
+            if loss != 0:
+                l1_loss *= 0.2
+            loss += l1_loss
+        return loss
+
+    def scale_transform(self, depth, focal, multiplier=7.5):
+        # 使用广播而不是重塑来处理标量或不同形状的focal值
+        return depth * multiplier / focal.unsqueeze(-1).unsqueeze(-1)
+
+    def compute_ref_params(self, cam2img, cam2ego, ego2global, img_aug_mat):
+        ego2keyego = torch.inverse(ego2global[:, 0:1]) @ ego2global[:, 1:]
+        cam2keyego = ego2keyego.unsqueeze(2) @ cam2ego.unsqueeze(1)
+        cam2keyego = torch.cat([cam2ego.unsqueeze(1), cam2keyego],
+                               dim=1).flatten(1, 2)
+        cam2img = cam2img.unsqueeze(1).expand(-1, 3, -1, -1, -1).flatten(1, 2)
+        img_aug_mat = img_aug_mat.unsqueeze(1).expand(-1, 3, -1, -1,
+                                                      -1).flatten(1, 2)
+        return dict(
+            cam2imgs=cam2img, cam2egos=cam2keyego, img_aug_mats=img_aug_mat)
+
+    def visualize_rendered_results(self,
+                                   results,
+                                   arrangement='vertical',
+                                   save_dir='vis'):
+        # (bs, t*n, 3/1, h, w)
+        assert arrangement in ('vertical', 'tiled')
+        if not isinstance(results, (list, tuple)):
+            results = [results]
+        vis = []
+        for res in results:
+            res = res[0]
+            if res.dim() == 3:
+                res = res.reshape(
+                    res.size(0), 1, -1, vis[0].size(1) // self.downsample)
+                res = res.unsqueeze(0).expand(3, *([-1] * 4)).flatten(0, 1)
+                res = F.interpolate(res, scale_factor=self.downsample)
+
+            img = res.permute(0, 2, 3, 1)  # (t * n, h, w, 3/1)
+            if arrangement == 'vertical':
+                img = img.flatten(0, 1)
+            else:
+                img = torch.cat((
+                    torch.cat((img[2], img[4]), dim=0),
+                    torch.cat((img[0], img[3]), dim=0),
+                    torch.cat((img[1], img[5]), dim=0),
+                ),
+                                dim=1)
+            img = img.detach().cpu().numpy()
+            if img.shape[-1] == 1:
+                from matplotlib import colormaps as cm
+                cmap = cm.get_cmap('Spectral_r')
+                img = cmap(img / (img.max() + 1e-5))[..., 0, :3]
+            img -= img.min()
+            img /= img.max()
+            vis.append(img)
+        vis = np.concatenate(vis, axis=-2)
+
+        if not hasattr(self, 'save_cnt'):
+            self.save_cnt = 0
+        else:
+            self.save_cnt += 1
+        if not osp.exists(save_dir):
+            os.makedirs(save_dir)
+        plt.imsave(osp.join(save_dir, f'{self.save_cnt}.png'), vis)

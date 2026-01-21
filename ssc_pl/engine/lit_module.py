@@ -45,7 +45,8 @@ class LitModule(L.LightningModule):
         
         if isinstance(loss, dict):
             loss['loss_total'] = sum(loss.values())
-            self.log_dict({f'train/{k}': v for k, v in loss.items()})
+            # 对每个损失值取平均值后再记录日志
+            self.log_dict({f'train/{k}': v.mean() for k, v in loss.items()})
         else:
             return 
             self.log('train/loss', loss)
@@ -75,7 +76,8 @@ class LitModule(L.LightningModule):
 
         if isinstance(loss, dict):
             loss['loss_total'] = sum(loss.values())
-            self.log_dict({f'{prefix}/{k}': v for k, v in loss.items()}, sync_dist=True)
+            # 对每个损失值取平均值后再记录日志
+            self.log_dict({f'{prefix}/{k}': v.mean() for k, v in loss.items()}, sync_dist=True)
         else:
             return 
             self.log(f'{prefix}/loss', loss, sync_dist=True)
@@ -92,7 +94,9 @@ class LitModule(L.LightningModule):
     def on_inference_epoch_end(self):
         self._log_metrics(self.test_evaluator, 'test')
 
-    def _log_metrics(self, evaluator, prefix=None):
+    def _log_metrics(self, evaluator=None, prefix=None):
+        if not evaluator:
+            return
         metrics = evaluator.compute()
         iou_per_class = metrics.pop('iou_per_class')
         if prefix:

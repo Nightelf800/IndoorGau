@@ -15,7 +15,7 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M}
 
 trainer:
-  devices: 1
+  devices: 2
   accelerator: gpu
   # strategy: ddp
   sync_batchnorm: True

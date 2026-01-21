@@ -4,18 +4,18 @@ data:
   datasets:
     type: NYUv2Gaussian
     splits: [train, test]  # replace with kv pairs if specified configs is in need
-    data_root: ./data/NYUv2_dataset/depthbin
+    data_root: ./data/NYUv2/depthbin
     # depth_root: /data2/ylc/codes/Depth-Anything/metric_depth/nyu_no_restraint_depth_visualize
-    depth_root: ./data/NYUv2_dataset/depthbin
+    depth_root: ./data/NYUv2/depthbin
     # seg_root:
-    label_root: ./data/NYUv2_dataset/preprocess/base
+    label_root: ./data/NYUv2/preprocess/base
     depth_eval: false
     use_crop: true
     voxel_size: 0.08
     pc_range: [0, 0, 0, 4, 4, 2]
     frustum_size: 8
   loader:
-    batch_size: 1 # batch size per GPU
+    batch_size: 2 # batch size per GPU
     num_workers: 4
 
 model:

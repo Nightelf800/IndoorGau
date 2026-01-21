@@ -1,0 +1,32 @@
+# @package _global_
+
+model:
+  type: InternetGauRender
+  embed_dims: 128
+  num_layers: 3
+  view_scales: [4, 8, 16]
+  vggt_path: ./checkpoints/VGGT-1B/snapshots/860abec7937da0a4c03c41d3c269c366e82abdf9
+  render: True
+
+
+  # depth:
+  #   depth_model: depth_anything
+  #   depth_model_name: zoedepth
+  #   depth_pretrained_resource: local::./checkpoints/depth_anything_metric_depth_indoor.pt
+  #   depth_dataset: nyu
+
+  encoder:
+    type: Dinov2Encoder
+    model_name: dinov2_vitb14_reg
+
+  decoder:
+    type: GaussianFormerDecoder
+    config_path: gaussianformer/config/nyuv2_gs25600_internet_render.py
+    custom_imports: gaussianformer
+  
+  criterions: [silog, mae, cosine]
+
+optimizer:
+  paramwise_cfg:
+    - name: encoder.model
+      lr_mult: 0.1

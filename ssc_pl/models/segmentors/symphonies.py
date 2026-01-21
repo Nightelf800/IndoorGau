@@ -8,7 +8,7 @@ from torchvision import transforms as T
 from ... import build_from_configs
 from .. import encoders
 from ..decoders import SymphoniesDecoder, SymphoniesDecoderMultiBS
-from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss
+from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss, hvm_ce_ssc_loss
 # from depth_eval.depth_anything.dpt import DepthAnything
 from depth_eval.zoedepth.utils.config import get_config
 from depth_eval.zoedepth.models.builder import build_model
@@ -29,6 +29,7 @@ class Symphonies(nn.Module):
         pc_range=[0, 0, 0, 0, 0, 0],
         voxel_size=0.2,
         downsample_z=2,
+        use_hvm=False,
         class_weights=None,
         criterions=None,
         depth=None,
@@ -39,6 +40,7 @@ class Symphonies(nn.Module):
         self.num_classes = num_classes
         self.class_weights = class_weights
         self.criterions = criterions
+        self.use_hvm = use_hvm
 
         self.encoder = build_from_configs(
             encoders, encoder, embed_dims=embed_dims, scales=view_scales)
@@ -65,6 +67,7 @@ class Symphonies(nn.Module):
             voxel_size=voxel_size,
             pc_range = pc_range,
             downsample_z=downsample_z,
+            use_hvm=use_hvm,
         )
 
         # depth_eval
@@ -155,19 +158,34 @@ class Symphonies(nn.Module):
                  f'fov_mask_{self.volume_scale}')))
         # import pdb;
         # pdb.set_trace()
-        outs = self.decoder(
-            pred_insts,
-            feats,
-            pred_masks,
-            depth,
-            K,
-            E,
-            voxel_origin,
-            projected_pix,
-            fov_mask
-        )
+        if self.use_hvm:
+            outs, hvm_out_dict, hvm_out_dict_pre, hvm_outs_list = self.decoder(
+                pred_insts,
+                feats,
+                pred_masks,
+                depth,
+                K,
+                E,
+                voxel_origin,
+                projected_pix,
+                fov_mask
+            )
+
+            return {'ssc_logits': outs[-1], 'aux_outputs': outs, 'hvm_out_dict': hvm_out_dict, 'hvm_out_dict_pre': hvm_out_dict_pre, 'hvm_outs_list': hvm_outs_list}
+        else:
+            outs = self.decoder(
+                pred_insts,
+                feats,
+                pred_masks,
+                depth,
+                K,
+                E,
+                voxel_origin,
+                projected_pix,
+                fov_mask
+            )
         
-        return {'ssc_logits': outs[-1], 'aux_outputs': outs}
+            return {'ssc_logits': outs[-1], 'aux_outputs': outs}
 
     def depth_infer(self, model, images, **kwargs):
         """Inference with flip augmentation"""
@@ -200,7 +218,12 @@ class Symphonies(nn.Module):
             'ce_ssc': ce_ssc_loss,
             'sem_scal': sem_scal_loss,
             'geo_scal': geo_scal_loss,
-            'frustum': frustum_proportion_loss
+            'frustum': frustum_proportion_loss,
+            
+        }
+
+        loss_map_extra = {
+            'hvm_ce_ssc': hvm_ce_ssc_loss
         }
 
         # print(f'class_weights: {self.class_weights}')
@@ -211,6 +234,8 @@ class Symphonies(nn.Module):
             for i, pred in enumerate(preds['aux_outputs']):
                 scale = 1 if i == len(preds['aux_outputs']) - 1 else 0.5
                 for loss in self.criterions:
+                    if loss not in loss_map:
+                        continue
                     losses['loss_' + loss + '_' + str(i)] = loss_map[loss]({
                         'ssc_logits': pred
                     }, target) * scale
@@ -218,4 +243,8 @@ class Symphonies(nn.Module):
             for loss in self.criterions:
                 losses['loss_' + loss] = 0
                 # losses['loss_' + loss] = loss_map[loss](preds, target)
+        if 'hvm_out_dict' in preds:
+            for loss in self.criterions:
+                if loss == 'hvm_ce_ssc':
+                    losses['loss_' + loss] = loss_map_extra[loss](preds, target)
         return losses

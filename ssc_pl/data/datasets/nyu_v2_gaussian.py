@@ -54,19 +54,6 @@ class NYUv2Gaussian(Dataset):
         xyz = get_meshgrid([0, 0, 0, 4, 4, 2], self.voxel_size)
         self.xyz = np.concatenate([xyz, np.ones_like(xyz[..., :1])], axis=-1) # x, y, z, 4
 
-        # self.depth_eval_transform = T.Compose([Resize(
-        #     width=518,
-        #     height=518,
-        #     resize_target=False,
-        #     keep_aspect_ratio=True,
-        #     ensure_multiple_of=14,
-        #     resize_method='lower_bound',
-        #     image_interpolation_method=cv2.INTER_CUBIC,
-        # ),
-        #     NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        #     PrepareForNet(),
-        # ])
-
 
     def __len__(self):
         return len(self.scan_names)
@@ -102,20 +89,22 @@ class NYUv2Gaussian(Dataset):
             # [100, 100, 50] 裁切
             target_1_2 = data.pop('target_1_2').transpose(0, 2, 1)
             target = target_1_2[:100, :100, :50]
-        elif not self.use_crop and self.voxel_size == 0.08:
-            # [50, 50, 25] 缩放
-            target_1_4 = data.pop('target_1_4').transpose(0, 2, 1)
-            zoom_factors = (50 / 60, 50 / 60, 25 / 36)
-            target = zoom(target_1_4, zoom_factors, order=0)
-        elif not self.use_crop and self.voxel_size == 0.04:
-            # [100, 100, 50] 缩放
-            target_1_1 = data.pop('target_1_1').transpose(0, 2, 1)
-            zoom_factors = (100 / 240, 100 / 240, 50 / 144)
-            target = zoom(target_1_1, zoom_factors, order=0)
-        else:
+        elif self.use_crop and self.voxel_size == 0.02:
             # [200, 200, 100] 裁切
             target_1_1 = data.pop('target_1_1').transpose(0, 2, 1)
             target = target_1_1[:200, :200, :100]
+        elif not self.use_crop and self.voxel_size == 0.08:
+            # [60, 60, 36]
+            target_1_4 = data.pop('target_1_4').transpose(0, 2, 1)
+            target = target_1_4
+        elif not self.use_crop and self.voxel_size == 0.04:
+            # [120, 120, 72] 缩放
+            target_1_2 = data.pop('target_1_2').transpose(0, 2, 1)
+            target = target_1_2
+        else:
+            # [240, 240, 144]
+            target_1_1 = data.pop('target_1_1').transpose(0, 2, 1)
+            target = target_1_1
 
         data['xyz'] = self.xyz[..., :3] + voxel_origin + self.voxel_size * 0.5
         label['target'] = target
@@ -153,10 +142,12 @@ class NYUv2Gaussian(Dataset):
         # label['frustums_class_dists'] = frustums_class_dists
 
         img_path = osp.join(self.data_root, filename + '_color.jpg')
-        img = Image.open(img_path).convert('RGB')
+        img = Image.open(img_path).convert('RGB') 
         img = np.asarray(img, dtype=np.float32) / 255.0
 
+
         data['img'] = self.transforms(img)  # (3, H, W)
+        label['img'] = img.transpose(2, 0, 1)  # (3, H, W)
         # data['img'] = self.depth_eval_transform({'image': img})['image']  # (3, H, W)
 
         if self.depth_root:
@@ -164,8 +155,22 @@ class NYUv2Gaussian(Dataset):
                 data['depth_eval'] = False
                 depth_path = osp.join(self.depth_root, filename + '.png')
                 depth = Image.open(depth_path)
-                label['depth'] = np.array(depth) / 8000.  # noqa
-                data['depth'] = np.array(depth) / 8000.  # noqa
+                depth_np = np.array(depth) / 8000.
+                label['depth'] = depth_np
+                data['depth'] = depth_np
+                
+                depth_tensor = torch.from_numpy(depth_np)
+                valid_mask = depth_tensor > 0
+                valid_depths = depth_tensor[valid_mask]
+                
+                if len(valid_depths) > 0:
+                    log_depths = torch.log(valid_depths + 1e-6)
+                    relative_depth = log_depths - log_depths.mean()
+                    scale_invariant_depth = torch.zeros_like(depth_tensor)
+                    scale_invariant_depth[valid_mask] = relative_depth
+                    label['relative_depth'] = scale_invariant_depth.unsqueeze(0)
+                else:
+                    label['relative_depth'] = torch.zeros_like(depth_tensor).unsqueeze(0)
             else:
                 data['depth_eval'] = True
                 # 本地加载深度数据集，若使用模型直接推理，请注释这段代码
@@ -187,4 +192,8 @@ class NYUv2Gaussian(Dataset):
 
         ndarray_to_tensor(data)
         ndarray_to_tensor(label)
+
+        # print(f'label[img].shape: {label["img"].shape}')
+        # print(f'label[depth].shape: {label["depth"].shape}')
+
         return data, label

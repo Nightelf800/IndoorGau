@@ -6,3 +6,4 @@ from .modules import *
 from .pos_embed import *
 from .transformer import *
 from .hvm_head import *
+from .indoor_gau_refine import *

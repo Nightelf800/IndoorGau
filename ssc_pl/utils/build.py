@@ -30,9 +30,10 @@ def pre_build_callbacks(cfg: DictConfig):
         callbacks.LearningRateMonitor(logging_interval='step'),
         callbacks.ModelCheckpoint(
             dirpath=logger[0].log_dir,
-            filename='e{epoch}_miou{val/mIoU:.4f}',
-            monitor='val/mIoU',
-            mode='max',
+            filename='internet-e{epoch}' if cfg.monitor.monitor == 'train/loss_total' else 'e{epoch}_miou{val/mIoU:.4f}',
+            monitor=None if cfg.monitor.monitor == 'train/loss_total' else 'val/mIoU',
+            mode='min' if cfg.monitor.monitor == 'train/loss_total' else 'max',
+            save_top_k= -1 if cfg.monitor.monitor == 'train/loss_total' else 1,
             auto_insert_metric_name=False),
         callbacks.ModelSummary(max_depth=3)
     ]

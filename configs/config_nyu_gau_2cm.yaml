@@ -5,7 +5,7 @@
 defaults:
   # - datasets: scanNet_v01
   - datasets: nyu_v2_gau_2cm
-  - models: gaussianformer
+  - models: gaussianformer_2cm
   # - models: symphonies
   - schedules: adamw_lr2e-4_30e
   - _self_
@@ -16,7 +16,7 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M}
 
 trainer:
-  devices: 2
+  devices: 1
   accelerator: gpu
   # strategy: ddp
   # strategy: ddp_find_unused_parameters_true

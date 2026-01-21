@@ -67,7 +67,7 @@ class NYUv2ScaleUpVL(Dataset):
         ])
 
         # self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=True)
-        self.tokenizer = AutoTokenizer.from_pretrained("./checkpoints/Qwen2.5-7B-Instruct", trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained("./checkpoints/Qwen2.5-0.5B-Instruct", trust_remote_code=True)
 
 
         # self.depth_eval_transform = T.Compose([Resize(
@@ -107,7 +107,7 @@ class NYUv2ScaleUpVL(Dataset):
             caption,
             padding='max_length',  # 根据需要设置padding
             truncation=True,       # 根据需要设置truncation
-            max_length=128,        # 根据模型要求设置最大长度
+            max_length=256,        # 根据模型要求设置最大长度
             return_tensors='pt'    # 返回PyTorch张量
         )
         

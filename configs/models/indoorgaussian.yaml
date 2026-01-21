@@ -1,0 +1,57 @@
+# @package _global_
+
+model:
+  type: IndoorGaussian
+  embed_dims: 128
+  num_queries: 300
+  num_layers: 3
+  view_scales: [4, 8, 16]
+  # pc_range: [-2, 0, -1, 2, 4, 1]
+  # pc_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] 
+
+  depth:
+    depth_model: None
+    depth_model_name: zoedepth
+    depth_pretrained_resource: local::./checkpoints/depth_anything_metric_depth_indoor.pt
+    depth_dataset: nyu
+
+  encoder:
+    type: Dinov2Encoder
+    model_name: dinov2_vitb14
+    checkpoint_path: checkpoints/dinov2_vitb14_pretrain.pth
+  
+  decoder:
+    type: GaussTRDecoder
+    num_layers: 3
+    return_intermediate: True
+    layer_cfg:
+        self_attn_cfg:
+            embed_dims: 128
+            num_heads: 8
+            dropout: 0.0
+        cross_attn_cfg:
+            embed_dims: 128
+            num_heads: 8
+            num_levels: 3
+        ffn_cfg:
+            embed_dims: 128
+            feedforward_channels: 2048
+    post_norm_cfg: None
+
+  head:
+    type: GaussTRHead
+    reduce_dims: 128
+    image_shape: [480, 640]
+    vol_range: [0, 0, 0, 4.8, 4.8, 2.88]
+    voxel_size: 0.08
+      
+
+
+
+  
+  criterions: [ce_ssc, sem_scal, geo_scal, frustum, hvm_ce_ssc]
+
+optimizer:
+  paramwise_cfg:
+    - name: encoder.model
+      lr_mult: 0.1

@@ -16,9 +16,15 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M}
 
 trainer:
-  devices: 1
+  devices: 2
   accelerator: gpu
   # strategy: ddp
   # strategy: ddp_find_unused_parameters_true
   sync_batchnorm: True
   # precision: 16-mixed
+
+monitor: 
+  monitor: val/mIOU
+  mode: max
+
+ckpt_path: outputs/ddp2_internet_test1/internet-e2.ckpt

@@ -2,6 +2,7 @@ from functools import reduce
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 from gsplat import rasterization
 
 def generate_grid(grid_shape, value=None, offset=0, normalize=False):
@@ -294,6 +295,72 @@ def setup_opengl_proj(w, h, k, w2c, near=0.01, far=100):
 
     return viewpoint_camera
 
+def cam2world(points, cam2img, cam2ego, img_aug_mat=None):
+    if img_aug_mat is not None:
+        post_rots = img_aug_mat[..., :3, :3]
+        post_trans = img_aug_mat[..., :3, 3]
+        points = points - post_trans.unsqueeze(-2)
+        points = (torch.inverse(post_rots).unsqueeze(2)
+                  @ points.unsqueeze(-1)).squeeze(-1)
+
+    cam2img = cam2img[..., :3, :3]
+    # 移除autocast上下文管理器，直接执行计算
+    combine = cam2ego[..., :3, :3] @ torch.inverse(cam2img)
+    points = points.float()
+    points = torch.cat(
+        [points[..., :2] * points[..., 2:3], points[..., 2:3]], dim=-1)
+    # 修复矩阵乘法的维度不匹配问题：combine.unsqueeze(1) 而不是 unsqueeze(2)
+    points = combine.unsqueeze(1) @ points.unsqueeze(-1)
+    points = points.squeeze(-1) + cam2ego[..., None, :3, 3]
+    return points
+
+def apply_to_items(func, iterable):
+    if isinstance(iterable, list):
+        return [func(i) for i in iterable]
+    elif isinstance(iterable, dict):
+        return {k: func(v) for k, v in iterable.items()}
+
+def get_covariance(s, r):
+    # 确保s有3个通道
+    if s.shape[-1] == 1:
+        s = s.expand(*s.shape[:-1], 3)
+    elif s.dim() == 1:
+        s = s.unsqueeze(-1).expand(-1, 3)
+    
+    L = torch.zeros(*s.shape[:-1], 3, 3, dtype=s.dtype, device=s.device)
+    for i in range(3):
+        L[..., i, i] = s[..., i]
+
+    L = r @ L
+    covariance = L @ L.mT
+    return covariance
+
+def quat_to_rotmat(quats):
+    q = quats / torch.sqrt((quats**2).sum(dim=-1, keepdim=True))
+    r, x, y, z = [i.squeeze(-1) for i in q.split(1, dim=-1)]
+
+    R = torch.zeros((*r.shape, 3, 3)).to(r)
+    R[..., 0, 0] = 1 - 2 * (y * y + z * z)
+    R[..., 0, 1] = 2 * (x * y - r * z)
+    R[..., 0, 2] = 2 * (x * z + r * y)
+    R[..., 1, 0] = 2 * (x * y + r * z)
+    R[..., 1, 1] = 1 - 2 * (x * x + z * z)
+    R[..., 1, 2] = 2 * (y * z - r * x)
+    R[..., 2, 0] = 2 * (x * z - r * y)
+    R[..., 2, 1] = 2 * (y * z + r * x)
+    R[..., 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
+
+def rotmat_to_quat(rot_matrices):
+    inputs = rot_matrices
+    rot_matrices = rot_matrices.cpu().numpy()
+    quats = []
+    for rot in rot_matrices:
+        while not np.allclose(rot @ rot.T, np.eye(3)):
+            U, _, V = np.linalg.svd(rot)
+            rot = U @ V
+        quats.append(Quaternion(matrix=rot).elements)
+    return torch.from_numpy(np.stack(quats)).to(inputs)
 
 def unbatched_forward(func):
 
@@ -329,47 +396,39 @@ def unbatched_forward(func):
     return wrapper
 
 
-# @unbatched_forward
-def rasterize_gaussians(means3d,
-                        colors,
-                        opacities,
-                        scales,
-                        rotations,
-                        cam2imgs,
-                        viewmat,
-                        image_size,
-                        img_aug_mats=None,
-                        **kwargs):
-    # cam2world to world2cam
-    # R = cam2egos[:, :3, :3].mT
-    # T = -R @ cam2egos[:, :3, 3:4]
-    # viewmat = torch.zeros_like(cam2egos)
-    # viewmat[:, :3, :3] = R
-    # viewmat[:, :3, 3:] = T
-    # viewmat[:, 3, 3] = 1
+def flatten_bsn_forward(func, *args, **kwargs):
+    args = list(args)
+    bsn = None
+    for i, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor):
+            if bsn is None:
+                bsn = arg.shape[:2]
+            args[i] = arg.flatten(0, 1)
+    for k, v in kwargs.items():
+        if isinstance(v, torch.Tensor):
+            if bsn is None:
+                bsn = v.shape[:2]
+            kwargs[k] = v.flatten(0, 1)
+    outs = func(*args, **kwargs)
+    if isinstance(outs, tuple):
+        outs = list(outs)
+        for i, out in outs:
+            outs[i] = out.reshape(bsn + out.shape[1:])
+    else:
+        outs = outs.reshape(bsn + outs.shape[1:])
+    return outs
 
-    if cam2imgs.shape[-2:] == (4, 4):
-        cam2imgs = cam2imgs[:, :3, :3]
-    if img_aug_mats is not None:
-        cam2imgs = cam2imgs.clone()
-        cam2imgs[:, :2, :2] *= img_aug_mats[:, :2, :2]
-        image_size = list(image_size)
-        for i in range(2):
-            cam2imgs[:, i, 2] *= img_aug_mats[:, i, i]
-            cam2imgs[:, i, 2] += img_aug_mats[:, i, 3]
-            image_size[1 - i] = round(image_size[1 - i] *
-                                      img_aug_mats[0, i, i].item() +
-                                      img_aug_mats[0, i, 3].item())
-
-    rendered_image = rasterization(
-        means3d,
-        rotations,
-        scales,
-        opacities,
-        colors,
-        viewmat,
-        cam2imgs,
-        width=image_size[1],
-        height=image_size[0],
-        **kwargs)[0]
-    return rendered_image
+OCC3D_CATEGORIES = (
+    ['empty'],
+    ['ceiling'],
+    ['floor'],
+    ['wall'],
+    ['window'],
+    ['chair'],
+    ['bed'],
+    ['sofa'],
+    ['table'],
+    ['tvs'],
+    ['furn'],
+    ['objs'],
+)
