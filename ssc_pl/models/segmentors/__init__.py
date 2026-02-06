@@ -5,5 +5,6 @@ from .symphonies_dinov2 import SymphoniesDinov2
 from .symphonies_dinov2_vl import SymphoniesDinov2VL
 
 from .gaussianformer import GaussianFormer
+from .gaussianformer_vl import GaussianFormerVL
 from .indoorgaussian import IndoorGaussian
 from .internet_gau_render import InternetGauRender

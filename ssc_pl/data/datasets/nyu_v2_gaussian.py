@@ -31,7 +31,6 @@ class NYUv2Gaussian(Dataset):
         self.data_root = osp.join(data_root, 'NYU' + split)
         self.label_root = osp.join(label_root, 'NYU' + split)
         self.depth_root = osp.join(depth_root, 'NYU' + split) if depth_root else None
-        self.seg_root = osp.join(seg_root, 'NYU' + split) if seg_root else None
         self.depth_eval = depth_eval
         self.frustum_size = frustum_size
         self.num_classes = 12
@@ -178,10 +177,6 @@ class NYUv2Gaussian(Dataset):
                 # depth = Image.open(depth_path)
                 # data['depth'] = np.array(depth) / 8000.
 
-        if self.seg_root:
-            seg_path = osp.join(self.seg_root, filename + '.png')
-            seg_2d = Image.open(seg_path)
-            label['seg_2d'] = np.array(seg_2d)
 
         def ndarray_to_tensor(data: dict):
             for k, v in data.items():

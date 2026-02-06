@@ -10,22 +10,23 @@ data:
     # seg_root:
     label_root: ./data/NYUv2/preprocess/base
     depth_eval: false
-    use_crop: false
+    use_crop: true
     voxel_size: 0.02
-    pc_range: [0, 0, 0, 4.8, 4.8, 2.88]
+    pc_range: [0, 0, 0, 4, 4, 2]
     frustum_size: 8
   loader:
-    batch_size: 1  # batch size per GPU
+    batch_size: 2  # batch size per GPU
     num_workers: 4
 
 model:
   channels: 200
-  scene_size: [240, 240, 144]
+  scene_size: [200, 200, 100]
   volume_scale: 1
   num_classes: 12
   image_shape: [480, 640]
   voxel_size: 0.02
   downsample_z: 1
+  use_hvm: false
 
 evaluator:
   type: SSCMetrics

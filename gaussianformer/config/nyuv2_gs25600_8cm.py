@@ -72,12 +72,13 @@ pc_range = [0, 0, 0, 4, 4, 2]
 img_shape = [480, 640]
 voxel_size = 0.08
 # pc_range = [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
-scale_range = [0.08, 0.32]
+scale_range = [0.008, 0.05]
 xyz_coordinate = 'cartesian'
 phi_activation = 'sigmoid'
 include_opa = True
 load_from = 'checkpoints/r101_dcn_fcos3d_pretrain.pth'
 semantics = True
+use_hvm_hard = False
 semantic_dim = 128
 
 model = dict(
@@ -225,6 +226,7 @@ model = dict(
             vol_range=pc_range,
             voxel_size=voxel_size),
         text_protos='./checkpoints/indoorGau_vitb16_text_embeds.pt',
+        use_hvm_hard=use_hvm_hard,
     )
 
 )

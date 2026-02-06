@@ -57,7 +57,7 @@ class InternetGauRender(nn.Module):
         self.vggt_infer = VGGTInfer(checkpoint_path=vggt_path)
 
         self.encoder = build_from_configs(
-            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor
+            encoders, encoder, in_channels=768, embed_dims=embed_dims
         )
         self.gaussian_decoder = build_from_configs(
             decoders, decoder, embed_dims=embed_dims
@@ -121,8 +121,9 @@ class InternetGauRender(nn.Module):
             return {
                 'rendered_feats': gaussian_deocder_outs['rendered_feats'], 
                 'gt_feats': gaussian_deocder_outs['gt_feats'],
-                'rendered_depth': gaussian_deocder_outs['rendered_depth'],
-                'gt_depth': vggt_res['depth']}
+                'rendered_depth': gaussian_deocder_outs['rendered_depth'] if 'rendered_depth' in gaussian_deocder_outs else None,
+                'gt_depth': vggt_res['depth'] if 'depth' in vggt_res else None,
+            }
         else:
             return {'ssc_logits': gaussian_deocder_outs['pred_occ'][-1]}
         # return {'ssc_logits': outs[-1], 'aux_outputs': outs}
@@ -209,7 +210,7 @@ class InternetGauRender(nn.Module):
         if self.render:
             for loss in self.criterions:
                 scale = 1 if loss != 'mae' else 0.2
-                if 'rendered_depth' in preds and loss in ['silog', 'mae']:
+                if 'rendered_depth' in preds and preds['rendered_depth'] is not None and loss in ['silog', 'mae']:
                     losses['loss_' + loss + '_depth'] = loss_map[loss](preds['rendered_depth'], preds['gt_depth']) * scale
                 # if 'rendered_feats' in preds:
                 #     losses['loss_' + 'mae' + '_colors'] = loss_map['mae'](preds['rendered_feats'], target['img'])

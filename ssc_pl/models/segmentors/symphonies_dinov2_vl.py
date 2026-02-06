@@ -8,7 +8,7 @@ from transformers import AutoModel, AutoConfig
 
 from ... import build_from_configs
 from .. import encoders
-from ..fusion import VisualLanguageFusion, VisualLanguageFusion3D, VLFusionAttLayers
+from ..fusion import VisualLanguageFusion, VLFusionAttLayers
 from ..decoders import SymphoniesDecoder, SymphoniesDecoderMultiBS
 from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss, hvm_ce_ssc_loss
 import pickle
@@ -126,7 +126,7 @@ class SymphoniesDinov2VL(nn.Module):
 
         # 初始化图像编码器
         self.img_encoder = build_from_configs(
-            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor, text_embed_dims=text_embed_dims)
+            encoders, encoder, in_channels=768, embed_dims=embed_dims, text_embed_dims=text_embed_dims)
 
         # 初始化视觉-语言融合模块
         # if fusion_type == '3d':

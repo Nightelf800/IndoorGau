@@ -13,6 +13,8 @@ from gaussianformer.model.head import GaussianRenderHead
 # from GaussianOcc.utils import render
 import numpy as np
 import torch
+from ..layers import HardVoxelMiningHead
+from ..fusion import ImgTextSelfCrossFusion
 from ..utils import prepare_gs_attribute, setup_opengl_proj
 
 SIGMOID_MAX = 9.21024
@@ -40,10 +42,13 @@ class GaussianFormerDecoder(nn.Module):
                  custom_imports,
                  checkpoint_path=None,
                  embed_dims=128,
+                 num_classes=12,
                  scales=(4, 8, 16),
                  num_queries=100,
                  freeze=False,
-                 use_encoder_deform_att=True):
+                 use_encoder_deform_att=True,
+                 use_hvm=False
+                 ):
         super().__init__()
         import_module(custom_imports)
         config = Config.fromfile(config_path)
@@ -67,6 +72,20 @@ class GaussianFormerDecoder(nn.Module):
         self.position = 'embedding'
         length_pose_encoding = 3
         self.opt = None
+        
+        self.sem_text_fusion = ImgTextSelfCrossFusion(
+            img_dim=embed_dims,
+            txt_dim=896,
+            hidden_dim=embed_dims,
+            num_heads=8
+        )
+        
+        self.use_hvm = use_hvm
+        self.embed_dims = embed_dims
+        if self.use_hvm:
+            self.hvm_head = HardVoxelMiningHead(
+                in_channel=12 + 12, embed_dims=12, num_classes=num_classes
+            )
 
     def forward(self, metas=None, points=None, ms_img_feats=None, voxel_feat=None, pca_matrix=None):
 
@@ -75,6 +94,8 @@ class GaussianFormerDecoder(nn.Module):
             'points': points,
             'ms_img_feats': ms_img_feats
         }
+        
+        
 
         # voxel_feat (B, 100, 100, 50, C)
         # center = torch.tensor([[1.2475, 0.0673, 1.5356]])
@@ -122,6 +143,27 @@ class GaussianFormerDecoder(nn.Module):
         # self.model.lifter.update_rot(rot)
 
         outs = self.model.lifter(**results)
+        
+        
+        if 'text_embeds' in metas:
+            text_embeds = metas['text_embeds']
+            # attention_mask = metas.get('attention_mask', None)
+            
+            # 提取语义特征
+            semantic_feats = outs['representation'][:, :, -self.embed_dims:]
+            
+            # 使用ImgTextSelfCrossFusion融合语义特征和文本特征
+            fused_semantic_feats = self.sem_text_fusion(
+                img_feat=semantic_feats,
+                txt_feat=text_embeds,
+            )
+            
+            # 将融合后的特征合并回results['representation']
+            # 确保梯度存在
+            outs['representation'] = torch.cat([
+                outs['representation'][:, :, :-self.embed_dims],
+                fused_semantic_feats
+            ], dim=-1)
 
         # print('model.lifter.rep_features', torch.isnan(outs['rep_features']).any())  # 检查 model.lifter.rep_features 是否有 NaN
         # print('model.lifter.rep_features', torch.isinf(outs['rep_features']).any())  # 检查 model.lifter.rep_features 是否有 Inf
@@ -129,7 +171,6 @@ class GaussianFormerDecoder(nn.Module):
         # print('model.lifter.representation', torch.isinf(outs['representation']).any())   # 检查 model.lifter.representation 是否有 Inf
         # print('GaussianFormer.outs[rep_features].shape: {}'.format(outs['rep_features'].shape))
         # print('GaussianFormer.outs[representation].shape: {}'.format(outs['representation'].shape))
-
         results.update(outs)
         outs = self.model.encoder(**results)
 
@@ -184,5 +225,14 @@ class GaussianFormerDecoder(nn.Module):
         # print('model.head.occ_mask', torch.isnan(outs['occ_mask']).any())   # 检查 model.head.occ_mask 是否有 NaN
         # print('model.head.occ_mask', torch.isinf(outs['occ_mask']).any())   # 检查 model.head.occ_mask 是否有 Inf
         # print('outs[occ_mask].shape: {}'.format(outs['occ_mask'].shape))
+        
+        if self.use_hvm:
+            hvm_hard_embed = results['hvm_hard']
+            # print(f'hvm_hard_embed.shape: {hvm_hard_embed.shape}')
+            hvm_out_dict = self.hvm_head(None, hvm_hard_embed)
+            # print(f'hvm_out_dict["refined_pred"].shape: {hvm_out_dict["refined_pred"].shape}')
+            # print(f'hvm_out_dict["sampled_voxel_coords"].shape: {hvm_out_dict["sampled_voxel_coords"].shape}')
+            results.update({'hvm_out_dict': hvm_out_dict})
+            
         
         return results

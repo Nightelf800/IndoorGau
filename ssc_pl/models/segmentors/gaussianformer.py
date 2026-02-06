@@ -10,8 +10,8 @@ from .. import encoders
 from ..encoders import dinov2_encoder
 from .. import decoders
 from ..decoders import SymphoniesDecoder
-from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss, lovasz_softmax_loss, \
-    mae_loss, silog_loss, cosine_loss
+from ..losses import ce_ssc_loss, frustum_proportion_loss, geo_scal_loss, sem_scal_loss, \
+    mae_loss, silog_loss, cosine_loss, hvm_ce_ssc_loss
 # from depth_eval.depth_anything.dpt import DepthAnything
 from depth_eval.zoedepth.utils.config import get_config
 from depth_eval.zoedepth.models.builder import build_model
@@ -36,7 +36,6 @@ class GaussianFormer(nn.Module):
         volume_scale,
         num_classes,
         num_layers=3,
-        scale_factor=1,
         image_shape=(370, 1220),
         pc_range=[0, 0, 0, 4, 4, 2],
         voxel_size=0.2,
@@ -45,6 +44,7 @@ class GaussianFormer(nn.Module):
         criterions=None,
         depth=None,
         render=False,
+        use_hvm=False,
         **kwargs,
     ):
         super().__init__()
@@ -54,47 +54,16 @@ class GaussianFormer(nn.Module):
         self.criterions = criterions
         self.gaussian_weight = 0.5
         self.symphonies_weight = 0.5
-
-        self.encoder = build_from_configs(
-            encoders, encoder, in_channels=768, embed_dims=embed_dims, scale_factor=scale_factor)
-        # self.encoder = dinov2_encoder(**encoder)
-        # GaussianEncoder
-        # self.encoder = build_from_configs(
-        #     encoders, encoder, embed_dims=embed_dims)
-
-        # self.symphony_model = ConfigManager.get_global_model()
-        image_grid = generate_grid(image_shape)
-        image_grid = torch.flip(image_grid, dims=[0]).unsqueeze(0)  # 2(wh), h, w
-        self.register_buffer('image_grid', image_grid)
-        scene_shape = (100, 100, 50)
-        voxel_grid = generate_grid(scene_shape, normalize=True)
-        self.register_buffer('voxel_grid', voxel_grid)
         self.voxel_size = voxel_size
 
-        self.projection = nn.Linear(768, 512)
+        self.encoder = build_from_configs(
+            encoders, encoder, in_channels=768, embed_dims=embed_dims)
         self.gaussian_decoder = build_from_configs(
-            decoders, decoder, embed_dims=embed_dims
+            decoders, decoder, embed_dims=embed_dims, use_hvm=use_hvm
         )
         self.pc_range = pc_range
         self.render = render
-        
-        # self.decoder = SymphoniesDecoder(
-        #     embed_dims,
-        #     num_classes,
-        #     num_layers=num_layers,
-        #     num_levels=len(view_scales),
-        #     scene_shape=scene_size,
-        #     project_scale=volume_scale,
-        #     image_shape=image_shape,
-        #     voxel_size=voxel_size,
-        #     downsample_z=downsample_z,
-        #     pc_range=pc_range,
-        #     use_tsdf=False,
-        # )
-        # import pdb;
-        # pdb.set_trace()
-        # for i in range(1000):
-        #     print(pc_range)
+        self.use_hvm = use_hvm
 
         # depth_eval
         self.depth_model = depth['depth_model']
@@ -209,7 +178,10 @@ class GaussianFormer(nn.Module):
                 'rendered_depth': gaussian_deocder_outs['rendered_depth'],
                 'ssc_logits': gaussian_deocder_outs['pred_occ'][-1]}
         else:
-            return {'ssc_logits': gaussian_deocder_outs['pred_occ'][-1]}
+            if self.use_hvm:
+                return {'aux_outputs': gaussian_deocder_outs['pred_occ'], 'ssc_logits': gaussian_deocder_outs['pred_occ'][-1], 'hvm_out_dict': gaussian_deocder_outs['hvm_out_dict']}
+            else:
+                return {'aux_outputs': gaussian_deocder_outs['pred_occ'], 'ssc_logits': gaussian_deocder_outs['pred_occ'][-1]}
         # return {'ssc_logits': outs[-1], 'aux_outputs': outs}
 
 
@@ -267,6 +239,9 @@ class GaussianFormer(nn.Module):
             'cosine': cosine_loss,
             # 'lovasz': lovasz_softmax_loss
         }
+        loss_map_extra = {
+            'hvm_ce_ssc': hvm_ce_ssc_loss
+        }
 
 
         # print(f'class_weights: {self.class_weights}')
@@ -306,11 +281,19 @@ class GaussianFormer(nn.Module):
                 for i, pred in enumerate(preds['aux_outputs']):
                     scale = 1 if i == len(preds['aux_outputs']) - 1 else 0.5
                     for loss in self.criterions:
+                        if loss not in loss_map:
+                            continue
                         losses['loss_' + loss + '_' + str(i)] = loss_map[loss]({
                             'ssc_logits': pred
                         }, target) * scale
             else:
                 for loss in self.criterions:
+                    if loss not in loss_map:
+                        continue
                     losses['loss_' + loss] = loss_map[loss](preds, target)
+            if 'hvm_out_dict' in preds:
+                for loss in self.criterions:
+                    if loss == 'hvm_ce_ssc':
+                        losses['loss_' + loss] = loss_map_extra[loss](preds, target)
 
         return losses

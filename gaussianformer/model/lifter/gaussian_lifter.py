@@ -68,6 +68,25 @@ class GaussianLifter(BaseLifter):
         self.scale_head = nn.Linear(self.semantic_dim, 3)
         self.rot_head = nn.Linear(self.semantic_dim, 4)
         
+    def update_semantic(self, new_semantic):
+        # 确保 new_semantic 是一个合适的 tensor
+        # 这里假设 new_semantic 已经是正确的形状和类型
+        if new_semantic is None:
+            return
+
+        assert new_semantic.shape == (self.num_anchor, self.semantic_dim), "new_semantic shape does not match."
+        # import pdb;
+        # pdb.set_trace()
+        # 分离出 anchor 中的其他部分
+        xyz_scale_rots_opacity = self.anchor[:, :-self.semantic_dim]
+        
+        # 创建一个新的 anchor，它是 xyz_scale_rots_opacity 和 new_semantic 的组合
+        new_anchor = torch.cat([xyz_scale_rots_opacity, new_semantic], dim=-1)
+        
+        # 更新 self.anchor
+        # 由于 self.anchor 是一个 nn.Parameter，我们需要用 nn.Parameter 包装更新后的值
+        self.anchor = torch.nn.Parameter(new_anchor, requires_grad=self.anchor.requires_grad)
+        
 
 
     def init_weight(self):

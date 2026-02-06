@@ -26,6 +26,7 @@ model:
   image_shape: [480, 640]
   voxel_size: 0.08
   downsample_z: 1
+  use_hvm: false
 
 evaluator:
   type: SSCMetrics

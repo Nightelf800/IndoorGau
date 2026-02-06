@@ -16,7 +16,7 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M}
 
 trainer:
-  devices: 2
+  devices: 4
   accelerator: gpu
   # strategy: ddp
   # strategy: ddp_find_unused_parameters_true

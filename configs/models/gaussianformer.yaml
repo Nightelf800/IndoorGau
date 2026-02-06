@@ -29,7 +29,7 @@ model:
     config_path: gaussianformer/config/nyuv2_gs25600_8cm.py
     custom_imports: gaussianformer
   
-  criterions: [ce_ssc, sem_scal, geo_scal]
+  criterions: [ce_ssc, sem_scal, geo_scal, hvm_ce_ssc]
   #lovasz
 
 optimizer:

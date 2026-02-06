@@ -1,0 +1,224 @@
+import os.path as osp
+import glob
+
+import cv2
+import numpy as np
+import torch
+import json
+import pickle
+
+from PIL import Image
+from scipy.ndimage import zoom
+from torch.utils.data import Dataset
+from torchvision import transforms as T
+from transformers import AutoTokenizer
+from ...utils.helper import vox2pix, compute_local_frustums, compute_CP_mega_matrix, get_meshgrid
+from depth_eval.depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
+
+
+
+
+class NYUv2GaussianVL(Dataset):
+
+    META_INFO = {
+        'class_weights':
+        torch.tensor((0.05, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)),
+        'class_names': ('empty', 'ceiling', 'floor', 'wall', 'window', 'chair', 'bed', 'sofa',
+                        'table', 'tvs', 'furn', 'objs'),
+    }
+
+    def __init__(self, split, data_root, label_root, caption_root, voxel_size=0.08, pc_range=None, depth_root=None, seg_root=None,
+                 use_crop=True, frustum_size=4, depth_eval=False, depth_encoder='null'):
+        self.data_root = osp.join(data_root, 'NYU' + split)
+        self.label_root = osp.join(label_root, 'NYU' + split)
+        self.depth_root = osp.join(depth_root, 'NYU' + split) if depth_root else None
+        self.caption_root = osp.join(caption_root, 'NYU' + split) if caption_root else None
+        self.depth_eval = depth_eval
+        self.frustum_size = frustum_size
+        self.num_classes = 12
+
+        self.voxel_size = voxel_size  # meters
+        self.use_crop = use_crop    # crop or scale
+
+        # self.scene_size = (4.8, 4.8, 2.88)  # meters
+        self.scene_size = (4, 4, 2)  # meters
+        self.pc_range = np.array(pc_range, dtype=np.float64)
+        self.img_shape = (640, 480)
+        self.cam_K = np.array(((518.8579, 0, 320), (0, 518.8579, 240), (0, 0, 1)))
+
+        self.scan_names = glob.glob(osp.join(self.data_root, '*.bin'))
+        self.transforms = T.Compose([
+            T.ToTensor(),
+            T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        
+        with open(self.caption_root + '/caption.json', 'r', encoding='utf-8') as f:
+            self.caption_dict = json.load(f)
+        self.tokenizer = AutoTokenizer.from_pretrained("./checkpoints/Qwen2.5-0.5B-Instruct", trust_remote_code=True)
+
+        xyz = get_meshgrid([0, 0, 0, 4, 4, 2], self.voxel_size)
+        self.xyz = np.concatenate([xyz, np.ones_like(xyz[..., :1])], axis=-1) # x, y, z, 4
+
+
+    def __len__(self):
+        return len(self.scan_names)
+
+    def __getitem__(self, idx):
+        filename = osp.basename(self.scan_names[idx])[:-4]
+        # filename = 'NYU0001_0000'
+
+        filepath = osp.join(self.label_root, filename + '.pkl')
+        with open(filepath, 'rb') as f:
+            data = pickle.load(f)
+
+        label = {}
+
+        cam_pose = np.linalg.inv(data['cam_pose'])
+        data['cam_pose'] = cam_pose
+        voxel_origin = data['voxel_origin']
+        data['cam_K'] = self.cam_K
+        # data['voxel_size'] = self.voxel_size
+        data['image_wh'] = np.array((640, 480))[np.newaxis, :]
+        
+        # camera extrinsic matual intrinsic
+        M_intrinsic = np.eye(4)
+        M_intrinsic[:3, :3] = self.cam_K
+        data['projection_mat'] = np.matmul(M_intrinsic, cam_pose)
+
+        # Following SSC literature, the output resolution on NYUv2 is set to 1/4
+        if self.use_crop and self.voxel_size == 0.08:
+            # [50, 50, 25] 裁切
+            target_1_4 = data.pop('target_1_4').transpose(0, 2, 1)
+            target = target_1_4[:50, :50, :25]
+        elif self.use_crop and self.voxel_size == 0.04:
+            # [100, 100, 50] 裁切
+            target_1_2 = data.pop('target_1_2').transpose(0, 2, 1)
+            target = target_1_2[:100, :100, :50]
+        elif self.use_crop and self.voxel_size == 0.02:
+            # [200, 200, 100] 裁切
+            target_1_1 = data.pop('target_1_1').transpose(0, 2, 1)
+            target = target_1_1[:200, :200, :100]
+        elif not self.use_crop and self.voxel_size == 0.08:
+            # [60, 60, 36]
+            target_1_4 = data.pop('target_1_4').transpose(0, 2, 1)
+            target = target_1_4
+        elif not self.use_crop and self.voxel_size == 0.04:
+            # [120, 120, 72] 缩放
+            target_1_2 = data.pop('target_1_2').transpose(0, 2, 1)
+            target = target_1_2
+        else:
+            # [240, 240, 144]
+            target_1_1 = data.pop('target_1_1').transpose(0, 2, 1)
+            target = target_1_1
+
+        data['xyz'] = self.xyz[..., :3] + voxel_origin + self.voxel_size * 0.5
+        label['target'] = target
+        target_1_4 = data.pop('target_1_16').transpose(0, 2, 1)
+
+        CP_mega_matrix = compute_CP_mega_matrix(target_1_4, is_binary=False)
+        label['CP_mega_matrix'] = CP_mega_matrix
+
+
+
+        # compute the 3D-2D mapping
+        projected_pix, fov_mask, pix_z = vox2pix(cam_pose, self.cam_K, voxel_origin,
+                                                 self.voxel_size, self.img_shape, self.scene_size, 
+                                                 self.pc_range, filepath)
+
+        # print(f'projected_pix.shape: {projected_pix.shape}')
+        # print(f'fov_mask.shape: {fov_mask.shape}')
+        # print(f'pix_z.shape: {pix_z.shape}')
+
+
+        data['projected_pix_1'] = projected_pix
+        data['fov_mask_1'] = fov_mask
+        data['label_mask'] = target != 255
+
+        # compute the masks, each indicates voxels inside a frustum
+        # frustums_masks, frustums_class_dists = compute_local_frustums(
+        #     projected_pix,
+        #     pix_z,
+        #     target,
+        #     self.img_shape,
+        #     n_classes=self.num_classes,
+        #     size=self.frustum_size,
+        # )
+        # label['frustums_masks'] = frustums_masks
+        # label['frustums_class_dists'] = frustums_class_dists
+
+        img_path = osp.join(self.data_root, filename + '_color.jpg')
+        img = Image.open(img_path).convert('RGB') 
+        img = np.asarray(img, dtype=np.float32) / 255.0
+
+
+        data['img'] = self.transforms(img)  # (3, H, W)
+        label['img'] = img.transpose(2, 0, 1)  # (3, H, W)
+        # data['img'] = self.depth_eval_transform({'image': img})['image']  # (3, H, W)
+        
+        caption = self.caption_dict[filename]['caption']
+        # 使用tokenizer直接处理文本，获取完整的输入信息（包括attention mask）
+        # 使用tokenizer()方法而不是单独调用tokenize()和convert_tokens_to_ids()
+        # 这样可以自动获取input_ids和attention_mask
+        tokenized_input = self.tokenizer(
+            caption,
+            padding='max_length',  # 根据需要设置padding
+            truncation=True,       # 根据需要设置truncation
+            max_length=256,        # 根据模型要求设置最大长度
+            return_tensors='pt'    # 返回PyTorch张量
+        )
+        
+        # 获取token_ids和attention_mask
+        token_ids = tokenized_input['input_ids'][0]  # [0]是因为return_tensors返回的是batch形式
+        attention_mask = tokenized_input['attention_mask'][0]
+        
+        # print(f'caption: {caption}')
+        # print(f'token_ids: {token_ids}')
+        # print(f'attention_mask: {attention_mask}')
+        # print(f'attention_mask shape: {attention_mask.shape}')
+        
+        # 你可以将这些值添加到data字典中供后续使用
+        data['token_ids'] = token_ids
+        data['attention_mask'] = attention_mask
+
+        if self.depth_root:
+            if self.depth_eval is False:
+                data['depth_eval'] = False
+                depth_path = osp.join(self.depth_root, filename + '.png')
+                depth = Image.open(depth_path)
+                depth_np = np.array(depth) / 8000.
+                label['depth'] = depth_np
+                data['depth'] = depth_np
+                
+                depth_tensor = torch.from_numpy(depth_np)
+                valid_mask = depth_tensor > 0
+                valid_depths = depth_tensor[valid_mask]
+                
+                if len(valid_depths) > 0:
+                    log_depths = torch.log(valid_depths + 1e-6)
+                    relative_depth = log_depths - log_depths.mean()
+                    scale_invariant_depth = torch.zeros_like(depth_tensor)
+                    scale_invariant_depth[valid_mask] = relative_depth
+                    label['relative_depth'] = scale_invariant_depth.unsqueeze(0)
+                else:
+                    label['relative_depth'] = torch.zeros_like(depth_tensor).unsqueeze(0)
+            else:
+                data['depth_eval'] = True
+                # 本地加载深度数据集，若使用模型直接推理，请注释这段代码
+                # depth_path = osp.join(self.depth_root, filename + '_pred.png')
+                # depth = Image.open(depth_path)
+                # data['depth'] = np.array(depth) / 8000.
+
+        def ndarray_to_tensor(data: dict):
+            for k, v in data.items():
+                if isinstance(v, np.ndarray):
+                    if v.dtype == np.float64:
+                        v = v.astype('float32')
+                    data[k] = torch.from_numpy(v)
+
+        ndarray_to_tensor(data)
+        ndarray_to_tensor(label)
+
+        # print(f'label[img].shape: {label["img"].shape}')
+        # print(f'label[depth].shape: {label["depth"].shape}')
+
+        return data, label

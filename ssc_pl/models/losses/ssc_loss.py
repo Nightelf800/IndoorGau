@@ -44,71 +44,34 @@ def hvm_ce_ssc_loss(pred, target):
         ignore_index=255,
     )
 
-
 def sem_scal_loss(pred, target):
     pred = pred['ssc_logits'].float()
     pred = F.softmax(pred, dim=1)
-
     target = target['target']
-    mask = (target != 255)
-    
-    # 检查mask是否有True值，如果没有直接返回0
-    if not mask.any():
-        return 0
-    
+    mask = target != 255
     target = target[mask]
-    
-    # 确保target不为空
-    if target.numel() == 0:
-        return 0
-    
+
     loss, cnt = 0, 0
     num_classes = pred.shape[1]
     for i in range(0, num_classes):
         p = pred[:, i]
         p = p[mask]
-        
-        # 确保p和target形状匹配
-        if p.shape != target.shape:
-            continue
-            
         completion_target = torch.ones_like(target)
         completion_target[target != i] = 0
 
-        # 检查completion_target是否有True值
         if torch.sum(completion_target) > 0:
             cnt += 1.0
             nominator = (p * completion_target).sum()
-            
-            # 计算precision
-            p_sum = p.sum()
-            if p_sum > 0:
-                precision = nominator / p_sum
-                # 确保precision在[0, 1]范围内
-                precision = torch.clamp(precision, 0.0, 1.0)
+            if p.sum() > 0:
+                precision = nominator / p.sum()
                 loss += F.binary_cross_entropy(precision, torch.ones_like(precision))
-            
-            # 计算recall
-            completion_target_sum = completion_target.sum()
-            if completion_target_sum > 0:
-                recall = nominator / completion_target_sum
-                # 确保recall在[0, 1]范围内
-                recall = torch.clamp(recall, 0.0, 1.0)
+            if completion_target.sum() > 0:
+                recall = nominator / completion_target.sum()
                 loss += F.binary_cross_entropy(recall, torch.ones_like(recall))
-            
-            # 计算specificity
-            neg_completion_target = 1 - completion_target
-            neg_completion_sum = neg_completion_target.sum()
-            if neg_completion_sum > 0:
-                # 预计算分子以避免重复计算
-                neg_nominator = ((1 - p) * neg_completion_target).sum()
-                specificity = neg_nominator / neg_completion_sum
-                # 确保specificity在[0, 1]范围内
-                specificity = torch.clamp(specificity, 0.0, 1.0)
+            if (1 - completion_target).sum() > 0:
+                specificity = (((1 - p) * (1 - completion_target)).sum() /
+                               (1 - completion_target).sum())
                 loss += F.binary_cross_entropy(specificity, torch.ones_like(specificity))
-    
-    if cnt == 0:
-        return 0
     return loss / cnt
 
 
@@ -116,15 +79,10 @@ def geo_scal_loss(pred, target):
     pred = pred['ssc_logits'].float()
     pred = F.softmax(pred, dim=1)
     target = target['target']
-    mask = (target != 255)
+    mask = target != 255
 
     empty_probs = pred[:, 0]
     nonempty_probs = 1 - empty_probs
-    
-    # 确保mask不为空
-    if not mask.any():
-        return 0
-        
     empty_probs = empty_probs[mask]
     nonempty_probs = nonempty_probs[mask]
 
@@ -132,27 +90,90 @@ def geo_scal_loss(pred, target):
     nonempty_target = nonempty_target[mask].float()
 
     intersection = (nonempty_target * nonempty_probs).sum()
-    loss = 0
-    if nonempty_probs.sum() > 0:
-        precision = intersection / nonempty_probs.sum()
-        # 确保precision在[0, 1]范围内
-        precision = torch.clamp(precision, 0.0, 1.0)
-        loss += F.binary_cross_entropy(precision, torch.ones_like(precision))
-    if nonempty_target.sum() > 0:
-        recall = intersection / nonempty_target.sum()
-        # 确保recall在[0, 1]范围内
-        recall = torch.clamp(recall, 0.0, 1.0)
-        loss += F.binary_cross_entropy(recall, torch.ones_like(recall))
-    if (1 - nonempty_target).sum() > 0:
-        specificity = ((1 - nonempty_target) * (empty_probs)).sum() / (1 - nonempty_target).sum()
-        # 确保specificity在[0, 1]范围内
-        specificity = torch.clamp(specificity, 0.0, 1.0)
-        loss += F.binary_cross_entropy(specificity, torch.ones_like(specificity))
-    return loss
-    # return (F.binary_cross_entropy(precision, torch.ones_like(precision)) +
-    #         F.binary_cross_entropy(recall, torch.ones_like(recall)) +
-    #         F.binary_cross_entropy(specificity, torch.ones_like(specificity)))
+    precision = intersection / nonempty_probs.sum()
+    recall = intersection / nonempty_target.sum()
+    specificity = ((1 - nonempty_target) * (empty_probs)).sum() / (1 - nonempty_target).sum()
+    return (F.binary_cross_entropy(precision, torch.ones_like(precision)) +
+            F.binary_cross_entropy(recall, torch.ones_like(recall)) +
+            F.binary_cross_entropy(specificity, torch.ones_like(specificity)))
 
+# def sem_scal_loss(pred, target, eps=1e-6):
+#     """
+#     Semantic-scale loss (metric-based, stable version)
+#     """
+#     logits = pred['ssc_logits'].float()
+#     prob = F.softmax(logits, dim=1)  # [B, C, ...]
+#     target = target['target']        # [B, ...]
+
+#     mask = (target != 255)
+#     if not mask.any():
+#         return logits.new_tensor(0.0)
+
+#     target_masked = target[mask]
+#     if target_masked.numel() == 0:
+#         return logits.new_tensor(0.0)
+
+#     num_classes = prob.shape[1]
+#     loss = 0.0
+#     cnt = 0.0
+
+#     for c in range(num_classes):
+#         p = prob[:, c][mask]  # predicted prob for class c
+
+#         # binary GT for class c
+#         gt = (target_masked == c).float()
+
+#         if gt.sum() == 0:
+#             continue
+
+#         # soft confusion terms
+#         tp = (p * gt).sum()
+#         fp = (p * (1.0 - gt)).sum()
+#         fn = ((1.0 - p) * gt).sum()
+#         tn = ((1.0 - p) * (1.0 - gt)).sum()
+
+#         precision = tp / (tp + fp + eps)
+#         recall = tp / (tp + fn + eps)
+#         specificity = tn / (tn + fp + eps)
+
+#         # metric-based loss (no BCE!)
+#         loss += (1.0 - precision) + (1.0 - recall) + (1.0 - specificity)
+#         cnt += 1.0
+
+#     if cnt == 0:
+#         return logits.new_tensor(0.0)
+
+#     return loss / cnt
+
+# def geo_scal_loss(pred, target, eps=1e-6):
+#     """
+#     Geometry-scale loss (empty vs non-empty), stable version
+#     """
+#     logits = pred['ssc_logits'].float()
+#     prob = F.softmax(logits, dim=1)
+#     target = target['target']
+
+#     mask = (target != 255)
+#     if not mask.any():
+#         return logits.new_tensor(0.0)
+
+#     empty_prob = prob[:, 0][mask]
+#     nonempty_prob = 1.0 - empty_prob
+
+#     nonempty_gt = (target != 0)[mask].float()
+
+#     # soft confusion terms
+#     tp = (nonempty_prob * nonempty_gt).sum()
+#     fp = (nonempty_prob * (1.0 - nonempty_gt)).sum()
+#     fn = ((1.0 - nonempty_prob) * nonempty_gt).sum()
+#     tn = ((1.0 - nonempty_prob) * (1.0 - nonempty_gt)).sum()
+
+#     precision = tp / (tp + fp + eps)
+#     recall = tp / (tp + fn + eps)
+#     specificity = tn / (tn + fp + eps)
+
+#     loss = (1.0 - precision) + (1.0 - recall) + (1.0 - specificity)
+#     return loss
 
 def frustum_proportion_loss(pred, target):
     pred = pred['ssc_logits'].float()

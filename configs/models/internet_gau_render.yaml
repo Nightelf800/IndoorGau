@@ -5,7 +5,7 @@ model:
   embed_dims: 128
   num_layers: 3
   view_scales: [4, 8, 16]
-  vggt_path: ./checkpoints/VGGT-1B/snapshots/860abec7937da0a4c03c41d3c269c366e82abdf9
+  vggt_path: ./checkpoints/VGGT-1B
   render: True
 
 
@@ -17,7 +17,8 @@ model:
 
   encoder:
     type: Dinov2Encoder
-    model_name: dinov2_vitb14_reg
+    model_name: dinov2_vitb14
+    checkpoint_path: checkpoints/dinov2_vitb14_pretrain.pth
 
   decoder:
     type: GaussianFormerDecoder

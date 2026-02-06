@@ -6,21 +6,22 @@ data:
     splits: [train]  # replace with kv pairs if specified configs is in need
     data_root: ./data/IndoorGau_dataset/split_video_frame_sample10k
 
-    voxel_size: 0.08
+    voxel_size: 0.02
     pc_range: [0, 0, 0, 4, 4, 2]
     frustum_size: 8
   loader:
-    batch_size: 4 # batch size per GPU
+    batch_size: 2 # batch size per GPU
     num_workers: 4
 
 model:
   channels: 200
-  scene_size: [50, 50, 25]
+  scene_size: [200, 200, 100]
   volume_scale: 1
   num_classes: 12
   image_shape: [480, 640]
-  voxel_size: 0.08
+  voxel_size: 0.02
   downsample_z: 1
+  use_hvm: false
 
 # evaluator:
 #   type: SSCMetrics

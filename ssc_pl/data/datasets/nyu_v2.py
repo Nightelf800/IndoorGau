@@ -54,8 +54,7 @@ class NYUv2(Dataset):
         self.voxel_size = voxel_size  # meters
         self.use_crop = use_crop    # crop or scale
 
-        self.scene_size = (4.8, 4.8, 2.88)  # meters
-        # self.scene_size = (4, 4, 2)  # meters
+        self.scene_size = (4, 4, 2)  # meters
         self.pc_range = np.array(pc_range, dtype=np.float64)
         self.img_shape =  (640, 480)
         self.cam_K = np.array(((518.8579, 0, 320), (0, 518.8579, 240), (0, 0, 1)))

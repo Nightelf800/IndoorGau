@@ -48,10 +48,10 @@ class HardVoxelMiningHead(nn.Module):
         norm_cfg = {'type': 'GN', 'num_groups': 32, 'requires_grad': True}
         self.occ_conv = nn.Sequential(
             build_conv_layer(conv_cfg, in_channels=embed_dims,
-                             out_channels=embed_dims, kernel_size=3, stride=1, padding=1),
-            build_norm_layer(norm_cfg, embed_dims)[1],
+                             out_channels=max(embed_dims, 32), kernel_size=3, stride=1, padding=1),
+            build_norm_layer(norm_cfg, max(embed_dims, 32))[1],
             nn.ReLU(inplace=True),
-            build_conv_layer(conv_cfg, in_channels=embed_dims,
+            build_conv_layer(conv_cfg, in_channels=max(embed_dims, 32),
                              out_channels=num_classes, kernel_size=1, stride=1, padding=0),
         )
 

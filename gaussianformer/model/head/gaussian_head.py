@@ -4,7 +4,7 @@ import torch, torch.nn as nn
 from mmengine.registry import MODELS
 from .base_head import BaseTaskHead
 from .localagg.local_aggregate import LocalAggregator as LocalAggregator1
-# from .localagg2.local_aggregate import LocalAggregator as LocalAggregator2
+
 from .gaussian_render_head import MLP
 from ..utils.utils import list_2_tensor, get_rotation_matrix
 import clip_surgery
@@ -15,7 +15,7 @@ class GaussianHead(BaseTaskHead):
         self, 
         init_cfg=None,
         apply_loss_type=None,
-        semantic_dim=256,
+        semantic_dim=128,
         num_classes=12,
         pc_range=None,
         empty_args=None,
@@ -25,13 +25,17 @@ class GaussianHead(BaseTaskHead):
         text_protos=None,
         dataset_type='nusc',
         empty_label=0,
+        use_hvm_hard=False,
         **kwargs,
     ):
         super().__init__(init_cfg)
         
+        self.semantic_dim = semantic_dim
         self.num_classes = num_classes
         self.aggregator = LocalAggregator1(**cuda_kwargs)
-        # self.aggregator2 = LocalAggregator2(**cuda_kwargs)
+        # if use_hvm_hard:
+        #     from .localagg2.local_aggregate import LocalAggregator as LocalAggregator2
+        #     self.aggregator2 = LocalAggregator2(**cuda_kwargs)
         self.H, self.W, self.D = cuda_kwargs['H'], cuda_kwargs['W'], cuda_kwargs['D']
         if with_empty:
             self.empty_scalar = nn.Parameter(torch.ones(1, dtype=torch.float))
@@ -44,6 +48,7 @@ class GaussianHead(BaseTaskHead):
         self.empty_args = empty_args
         self.dataset_type = dataset_type
         self.empty_label = empty_label
+        self.use_hvm_hard = use_hvm_hard
 
         if apply_loss_type == 'all':
             self.apply_loss_type = 'all'
@@ -54,6 +59,7 @@ class GaussianHead(BaseTaskHead):
             raise NotImplementedError
 
         self.feat_head = MLP(input_dim=semantic_dim, output_dim=768)
+        # self.hard_voxel_head = MLP(input_dim=semantic_dim, output_dim=64)
 
         self.register_buffer('zero_tensor', torch.zeros(1, dtype=torch.float))
         self.register_buffer('pc_range', torch.tensor(pc_range, dtype=torch.float))
@@ -169,7 +175,7 @@ class GaussianHead(BaseTaskHead):
         pc_min = pc_real_range[:, :3]
 
         prediction = []
-        prediction_base = []
+        prediction_hard_voxel = []
         # dense = []
         occ_xyz = metas['occ_xyz'].to(self.zero_tensor.device)
         occ_cam_mask = metas['occ_cam_mask'].to(self.zero_tensor.device)
@@ -184,8 +190,8 @@ class GaussianHead(BaseTaskHead):
             gaussians = representation[idx]['gaussian']
             # import pdb;
             # pdb.set_trace()
-            means, origi_opa, opacities, scales, CovInv, Cov = self.prepare_gaussian_args(gaussians)
-            opacities = self.feat_head(opacities)
+            means, origi_opa, opacities_sem_feat, scales, CovInv, Cov = self.prepare_gaussian_args(gaussians)
+            opacities = self.feat_head(opacities_sem_feat)
             bs, g = means.shape[:2]
             # import pdb;
             # pdb.set_trace()
@@ -210,14 +216,16 @@ class GaussianHead(BaseTaskHead):
 
             # 初始化存储列表
             semantics_list = []
-            density_list = []
+            if self.use_hvm_hard:
+                hvm_hard_list = []
+                # opacities_hard_voxel = self.hard_voxel_head(opacities_sem_feat)     
 
             # 逐样本计算
             for i in range(bs):
                 # 处理第 i 个样本
                 current_xyz = sampled_xyz[i].clone().float()  # [g, 3] 或其他形状
                 current_opa = origi_opa[i].reshape(-1)  # [g] 或其他形状
-
+            
                 # 调用 aggregator（单样本）
                 current_semantics = self.aggregator(
                     current_xyz,
@@ -227,26 +235,46 @@ class GaussianHead(BaseTaskHead):
                     scales[i],
                     CovInv[i],
                     pc_min[i]
-                ).unsqueeze(0).transpose(1, 2)  # [1, c, n]
-
-                # 调用 aggregator2（单样本）
-                # current_density = self.aggregator2(
-                #     current_xyz,
-                #     means[i],
-                #     current_opa,
-                #     scales[i],
-                #     CovInv[i],
-                #     pc_min[i]
-                # ).unsqueeze(0).transpose(1, 2)  # [1, c, n]
-
+                ).transpose(0, 1)  # [c, n]
+                
                 # 保存结果
-                semantics_list.append(current_semantics.reshape(self.num_classes, self.H, self.W, self.D))
-                # density_list.append(current_density.reshape(1, self.H, self.W, self.D))
+                current_semantics_reshape = current_semantics.reshape(self.num_classes, self.H, self.W, self.D)
+                # print(f'current_semantics_reshape.shape: {current_semantics_reshape.shape}')
+                semantics_list.append(current_semantics_reshape)
+
+                if self.use_hvm_hard:
+                    
+                    # print(f'opacities_sem_feat[i].shape: {opacities_sem_feat[i].shape}')
+                    
+                    # u, s, v = torch.pca_lowrank(
+                    #     opacities_sem_feat[i].double(), q=64, niter=4)
+                    # opacities_sem_feat_bi = opacities_sem_feat[i] @ v.to(opacities_sem_feat[i])
+                    # opacities_sem_feat_bi = opacities_sem_feat_bi.float()
+                                   
+
+                    # 调用 aggregator2（单样本）
+                    # current_hvm_hard = self.aggregator2(
+                    #     current_xyz,
+                    #     means[i],
+                    #     current_opa,
+                    #     opacities_sem_feat_bi,
+                    #     scales[i],
+                    #     CovInv[i],
+                    #     pc_min[i]
+                    # ).transpose(0, 1)  # [c, n]
+                    # print(f'current_hvm_hard.shape: {current_hvm_hard.shape}')
+                    
+                    # current_hvm_hard_reshape = current_hvm_hard.reshape(64, self.H, self.W, self.D)
+                    hvm_hard_list.append(current_semantics_reshape)
 
             # 合并结果（堆叠成 batch）
             semantics = torch.stack(semantics_list, dim=0)  # [bs, num_classes, H, W, D]
-            # density = torch.stack(density_list, dim=0)  # [bs, 1, H, W, D]
-
+            # print(f'semantics.shape: {semantics.shape}')
+            if self.use_hvm_hard:
+                hvm_hard = torch.stack(hvm_hard_list, dim=0)  # [bs, n, c]
+                # print(f'hvm_hard.shape: {hvm_hard.shape}')
+                prediction_hard_voxel.append(hvm_hard)
+            
             # 添加到 prediction 和 dense
             prediction.append(semantics)
             # dense.append(density)
@@ -267,7 +295,7 @@ class GaussianHead(BaseTaskHead):
             # 'pred_dense': dense,
             'semantics': semantics,
             'pred_occ': prediction,
-            # 'pred_density': dense,
+            'hvm_hard': prediction_hard_voxel[-1] if self.use_hvm_hard else None,
             'sampled_xyz': sampled_xyz,
             'occ_mask': occ_cam_mask,
             'gaussian': representation[-1]['gaussian']

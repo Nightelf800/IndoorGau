@@ -259,6 +259,7 @@ class SymphoniesDecoderMultiBS(nn.Module):
         for i, layer in enumerate(self.layers):
             scene_embed, inst_queries = layer(scene_embed, inst_queries, feats, scene_pos, inst_pos,
                                               ref_2d, ref_3d, ref_vox, fov_mask)
+            
             if i == 2:
                 scene_embed = self.aspp(scene_embed)
             if self.training or i == len(self.layers) - 1:
@@ -267,6 +268,7 @@ class SymphoniesDecoderMultiBS(nn.Module):
             if self.use_hvm:
                 # extract last two layer voxel feats for voxel mining
                 if i == len(self.layers) - 1 or i == len(self.layers) - 2:
+                    # print(f'layer {i} scene_embed.shape: {scene_embed.shape}')
                     hvm_outs_list.append(scene_embed)
 
         if self.use_hvm:

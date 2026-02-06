@@ -26,5 +26,3 @@ trainer:
 monitor: 
   monitor: val/mIOU
   mode: max
-
-ckpt_path: outputs/ddp2_internet_test1/internet-e2.ckpt

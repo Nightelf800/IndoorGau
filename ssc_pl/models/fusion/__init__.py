@@ -1,1 +1,1 @@
-from .vl_fusion import VisualLanguageFusion, VisualLanguageFusion3D, VLFusionAttLayers, TextImgAttLayers
+from .vl_fusion import VisualLanguageFusion, VLFusionAttLayers, TextImgAttLayers, ImgTextSelfCrossFusion

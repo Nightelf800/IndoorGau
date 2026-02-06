@@ -15,7 +15,7 @@ model:
     depth_dataset: nyu
 
   encoder:
-    type: Dinov2Encoder
+    type: Dinov2VLFEncoder
     model_name: dinov2_vitb14
     checkpoint_path: checkpoints/dinov2_vitb14_pretrain.pth
 
@@ -29,7 +29,7 @@ model:
     config_path: gaussianformer/config/nyuv2_gs25600_2cm.py
     custom_imports: gaussianformer
   
-  criterions: [ce_ssc, sem_scal, geo_scal]
+  criterions: [ce_ssc, sem_scal, geo_scal, hvm_ce_ssc]
   #lovasz
 
 optimizer:

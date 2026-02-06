@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class VisualLanguageFusion(nn.Module):
     """
@@ -224,9 +225,6 @@ class TextImgAttLayers(nn.Module):
         self.num_heads = num_heads
         self.ffn_dim = ffn_dim
         
-        # 将图像特征投影到与文本特征相同的维度
-        self.img_projection = nn.Linear(img_embed_dims, text_embed_dims)
-        
         # 创建n层注意力模块
         self.att_layers = nn.ModuleList()
         for _ in range(num_layers):
@@ -274,9 +272,7 @@ class TextImgAttLayers(nn.Module):
         返回：
             processed_text: 处理后的文本特征，形状为 [batch_size, seq_len, text_embed_dims]
         """
-        # 1. 将图像特征投影到与文本特征相同的维度
-        projected_img = self.img_projection(img_features)
-        
+
         # 2. 处理文本注意力掩码
         if text_attention_mask is not None:
             # MultiheadAttention期望的是[batch_size, seq_len]形状的key_padding_mask
@@ -303,8 +299,8 @@ class TextImgAttLayers(nn.Module):
             # 交叉注意力 - 文本特征作为query，图像特征作为key和value
             cross_attn_output, _ = layer['cross_attn'](
                 query=x,
-                key=projected_img,
-                value=projected_img,
+                key=img_features,
+                value=img_features,
                 key_padding_mask=None
             )
             
@@ -326,92 +322,159 @@ class TextImgAttLayers(nn.Module):
         return processed_text
 
 
-class VisualLanguageFusion3D(nn.Module):
-    """
-    更适合3D视觉领域的视觉-语言融合模块
-    结合文本特征池化、多尺度特征融合、特征调制和空间注意力引导
-    """
-    def __init__(self, img_embed_dims, text_embed_dims, output_dims):
+class TextSelfAttention(nn.Module):
+    def __init__(self, dim, num_heads=4, dropout=0.1):
         super().__init__()
-        self.img_embed_dims = img_embed_dims
-        self.text_embed_dims = text_embed_dims
-        self.output_dims = output_dims
-        
-        # 文本特征处理
-        # 1. 全局文本特征（池化）
-        self.text_global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
         )
-        # 2. 文本特征投影
-        self.text_projection = nn.Linear(text_embed_dims, img_embed_dims)
-        
-        # 特征调制模块
-        # 使用文本特征调制图像特征的通道权重
-        self.channel_modulation = nn.Sequential(
-            nn.Linear(img_embed_dims, img_embed_dims),
-            nn.Sigmoid()
+        self.norm1 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim * 4, dim)
         )
-        
-        # 空间注意力引导
-        # 使用文本特征生成空间注意力图
-        self.spatial_attention = nn.Sequential(
-            nn.Linear(img_embed_dims, img_embed_dims),
-            nn.ReLU(),
-            nn.Linear(img_embed_dims, 1)
-        )
-        
-        # 多尺度融合控制
-        self.scale_weight = nn.Parameter(torch.ones(1))
-        
-        # 输出处理
-        self.output_projection = nn.Linear(img_embed_dims, output_dims)
-        self.norm = nn.LayerNorm(output_dims)
-        self.dropout = nn.Dropout(0.1)
-        
-    def forward(self, img_features, text_features, text_attention_mask=None):
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, x, mask=None):
         """
-        前向传播
-        
-        参数：
-            img_features: 图像特征，形状为 [batch_size, num_patches, img_embed_dims]
-            text_features: 文本特征，形状为 [batch_size, seq_len, text_embed_dims]
-            text_attention_mask: 文本注意力掩码，形状为 [batch_size, seq_len]
-            
-        返回：
-            fused_features: 融合后的特征，形状为 [batch_size, num_patches, output_dims]
+        x: [B, M, D]
+        mask: [B, M] (True = valid token)
         """
-        # 1. 文本特征处理
-        # 计算全局文本特征
-        if text_attention_mask is not None:
-            # 应用注意力掩码进行加权池化
-            text_features_masked = text_features * text_attention_mask.unsqueeze(-1)
-            text_global = self.text_global_pool(text_features_masked.transpose(1, 2))
-        else:
-            text_global = self.text_global_pool(text_features.transpose(1, 2))
-        
-        # 投影文本特征
-        projected_text = self.text_projection(text_global)  # [batch_size, img_embed_dims]
-        
-        # 2. 特征调制
-        # 使用文本特征调制图像特征的通道权重
-        channel_weights = self.channel_modulation(projected_text)  # [batch_size, img_embed_dims]
-        img_features_modulated = img_features * channel_weights.unsqueeze(1)  # [batch_size, num_patches, img_embed_dims]
-        
-        # 3. 空间注意力引导
-        # 计算空间注意力权重
-        spatial_attn = self.spatial_attention(img_features_modulated)  # [batch_size, num_patches, 1]
-        spatial_attn = torch.softmax(spatial_attn, dim=1)  # 在空间维度上归一化
-        
-        # 应用空间注意力
-        img_features_attended = img_features_modulated * spatial_attn  # [batch_size, num_patches, img_embed_dims]
-        
-        # 4. 残差融合
-        # 将调制和注意力引导后的特征与原始特征融合
-        fused_features = img_features + self.dropout(img_features_attended)
-        
-        # 5. 输出投影
-        fused_features = self.output_projection(fused_features)
-        fused_features = self.norm(fused_features)
-        
-        return fused_features
+        attn_mask = None
+        if mask is not None:
+            attn_mask = ~mask  # MultiheadAttention uses True for padding
+
+        # self-attention
+        attn_out, _ = self.attn(x, x, x, key_padding_mask=attn_mask)
+        x = self.norm1(x + attn_out)
+
+        # FFN
+        x = self.norm2(x + self.ffn(x))
+        return x
+
+class ImageTextCrossAttention(nn.Module):
+    """
+    Image-Text Cross-Attention Fusion Module
+    Image features attend to text (caption) features
+    """
+
+    def __init__(
+        self,
+        img_dim,
+        txt_dim,
+        hidden_dim,
+        num_heads=4,
+        dropout=0.1
+    ):
+        super().__init__()
+
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.head_dim = hidden_dim // num_heads
+        assert hidden_dim % num_heads == 0
+
+        # projections
+        self.q_proj = nn.Linear(img_dim, hidden_dim)
+        self.k_proj = nn.Linear(txt_dim, hidden_dim)
+        self.v_proj = nn.Linear(txt_dim, hidden_dim)
+
+        self.out_proj = nn.Linear(hidden_dim, img_dim)
+
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(img_dim)
+
+        # optional FFN (Transformer-style)
+        self.ffn = nn.Sequential(
+            nn.Linear(img_dim, img_dim * 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(img_dim * 4, img_dim),
+        )
+        self.ffn_norm = nn.LayerNorm(img_dim)
+
+    def forward(self, img_feat, txt_feat, txt_mask=None):
+        """
+        img_feat: [B, N, C_img]
+        txt_feat: [B, M, C_txt]
+        txt_mask: [B, M] (True for valid tokens, optional)
+        """
+
+        B, N, _ = img_feat.shape
+        _, M, _ = txt_feat.shape
+
+        # project
+        Q = self.q_proj(img_feat)  # [B, N, H]
+        K = self.k_proj(txt_feat)  # [B, M, H]
+        V = self.v_proj(txt_feat)  # [B, M, H]
+
+        # reshape for multi-head
+        Q = Q.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # attention
+        attn = torch.matmul(Q, K.transpose(-2, -1))  # [B, h, N, M]
+        attn = attn / (self.head_dim ** 0.5)
+
+        if txt_mask is not None:
+            txt_mask = txt_mask.unsqueeze(1).unsqueeze(2)  # [B,1,1,M]
+            attn = attn.masked_fill(~txt_mask, float('-inf'))
+
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, V)  # [B, h, N, d]
+        out = out.transpose(1, 2).contiguous().view(B, N, self.hidden_dim)
+
+        out = self.out_proj(out)
+
+        # residual + norm
+        img_feat = self.norm(img_feat + out)
+
+        # FFN
+        img_feat = self.ffn_norm(img_feat + self.ffn(img_feat))
+
+        return img_feat
+    
+class ImgTextSelfCrossFusion(nn.Module):
+    """
+    Text Self-Attention → Image-Text Cross-Attention
+    """
+    def __init__(
+        self,
+        img_dim,
+        txt_dim,
+        hidden_dim,
+        num_heads=4,
+        dropout=0.1
+    ):
+        super().__init__()
+
+        self.text_encoder = TextSelfAttention(
+            dim=txt_dim,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+
+        self.cross_attn = ImageTextCrossAttention(
+            img_dim=img_dim,
+            txt_dim=txt_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+
+    def forward(self, img_feat, txt_feat, txt_mask=None):
+        """
+        img_feat: [B, N, C_img]
+        txt_feat: [B, M, C_txt]
+        txt_mask: [B, M]
+        """
+        if txt_mask is not None:
+            txt_mask = txt_mask.bool()
+        txt_feat = self.text_encoder(txt_feat, txt_mask)
+        img_feat = self.cross_attn(img_feat, txt_feat, txt_mask)
+        return img_feat

@@ -20,3 +20,7 @@ trainer:
   # strategy: ddp
   sync_batchnorm: True
   # precision: 16-mixed
+
+monitor: 
+  monitor: val/mIOU
+  mode: max

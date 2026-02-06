@@ -52,7 +52,7 @@ class GaussianInternetRenderHead(BaseTaskHead):
         # 特征形状为[batch, channels, height, width]，对channels维度进行归一化
         # encoder_feat_ori = F.normalize(encoder_feat_ori, p=2, dim=1, eps=1e-8)
         
-        tgt_feats = render_encoder_feat_ori.flatten(-2).mT.flatten(0, 1)
+        tgt_feats = render_encoder_feat_ori.flatten(0, 1)
 
         
         u, s, v = torch.pca_lowrank(
@@ -89,16 +89,16 @@ class GaussianInternetRenderHead(BaseTaskHead):
             image_size=(img_h, img_w),
             near_plane=0.1,
             far_plane=100,
-        render_mode='RGB+D',  # NOTE: 'ED' mode is better for visualization
-        channel_chunk=32).flatten(0, 1)
+            render_mode='RGB',  # NOTE: 'ED' mode is better for visualization
+            channel_chunk=32).flatten(0, 1)
         
-        depth = rendered[:, -1]
-        rendered = rendered[:, :-1]
+        # depth = rendered[:, -1]
+        # rendered = rendered[:, :-1]
         # depth = depth.clamp(min=0.0, max=80)
 
         b, c, h, w = rendered.shape
-        new_w = ((w + self.patch_size - 1) // self.patch_size) * self.patch_size
         new_h = ((h + self.patch_size - 1) // self.patch_size) * self.patch_size
+        new_w = ((w + self.patch_size - 1) // self.patch_size) * self.patch_size
         
         if new_w != w or new_h != h:
             # print(f'Resizing image from ({w}, {h}) to ({new_w}, {new_h}) to be divisible by patch_size {self.patch_size}')
@@ -120,6 +120,6 @@ class GaussianInternetRenderHead(BaseTaskHead):
         return {
             'rendered_feats': rendered,
             'gt_feats': tgt_feats,
-            'rendered_depth': depth,
+            # 'rendered_depth': depth,
             'rendered_seg': seg_rendered,
         }

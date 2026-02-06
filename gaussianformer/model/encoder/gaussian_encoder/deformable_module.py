@@ -241,7 +241,7 @@ class DeformableFeatureAggregation(BaseModule):
                 temp_features_next = DAF.apply(
                     *temp_feature_maps, points_2d_3, weights
                 )
-                # print(f'temp_features_next.shape: {temp_features_next.shape}')
+                
                 temp_features_next = temp_features_next.reshape(bs, num_anchor, self.num_pts, self.embed_dims)
             else:
                 temp_features_next = self.feature_sampling(
