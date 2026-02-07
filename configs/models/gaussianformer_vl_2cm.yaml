@@ -27,7 +27,7 @@ model:
 
   decoder:
     type: GaussianFormerDecoder
-    config_path: gaussianformer/config/nyuv2_gs25600_2cm.py
+    config_path: gaussianformer/config/nyuv2_gs25600_vl_2cm.py
     custom_imports: gaussianformer
   
   criterions: [ce_ssc, sem_scal, geo_scal, hvm_ce_ssc]

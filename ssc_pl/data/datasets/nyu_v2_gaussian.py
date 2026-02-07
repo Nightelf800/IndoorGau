@@ -68,6 +68,7 @@ class NYUv2Gaussian(Dataset):
         label = {}
 
         cam_pose = np.linalg.inv(data['cam_pose'])
+        data['filename'] = filename
         data['cam_pose'] = cam_pose
         voxel_origin = data['voxel_origin']
         data['cam_K'] = self.cam_K

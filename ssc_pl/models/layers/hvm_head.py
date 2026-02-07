@@ -59,6 +59,7 @@ class HardVoxelMiningHead(nn.Module):
         output_dict = {}
 
         voxel_feature = voxel_feat
+        
         coarse_prediction = self.occ_conv(voxel_feature)
 
         sampled_voxels_coords = sampling_hard_voxels(coarse_prediction, self.N, self.t, self.omega)

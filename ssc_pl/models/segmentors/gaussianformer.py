@@ -56,8 +56,14 @@ class GaussianFormer(nn.Module):
         self.symphonies_weight = 0.5
         self.voxel_size = voxel_size
 
+        # DINOv2
         self.encoder = build_from_configs(
             encoders, encoder, in_channels=768, embed_dims=embed_dims)
+        # MaskDINO, Resnet
+        # self.encoder = build_from_configs(
+        #     encoders, encoder, embed_dims=embed_dims, scales=view_scales)
+
+        
         self.gaussian_decoder = build_from_configs(
             decoders, decoder, embed_dims=embed_dims, use_hvm=use_hvm
         )

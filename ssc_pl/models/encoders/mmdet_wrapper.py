@@ -90,6 +90,7 @@ class MMDetWrapper(nn.Module):
         return dict(
             queries=self.query_embed.weight.repeat(bs, 1, 1),
             feats=feats,
+            encoder_feat_ori=feats[-1],
             pred_pts=self.pts_embed.weight.repeat(bs, 1, 1).sigmoid())
 
     def filter_topk_queries(self, queries):

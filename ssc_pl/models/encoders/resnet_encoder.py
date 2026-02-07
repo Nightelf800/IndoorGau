@@ -1,7 +1,10 @@
+import torch
+import torch.nn as nn
 from torchvision.models.resnet import resnet34, resnet50, resnet101, resnet152
 
+
 class ResNet(nn.Module):
-    def __init__(self, in_channels=3, backbone="resnet50", dropout_rate=0.2,
+    def __init__(self, in_channels=3, embed_dims=256, scales=None, backbone="resnet50", dropout_rate=0.2,
                  pretrained=True):
         super(ResNet, self).__init__()
 
@@ -22,9 +25,6 @@ class ResNet(nn.Module):
             self.expansion = 4
         else:
             raise NotImplementedError("invalid backbone: {}".format(backbone))
-
-        print(net)
-        exit()
         
         self.feature_channels = [64 * self.expansion, 128 * self.expansion, 256 * self.expansion, 512 * self.expansion]
         self.backbone_name = backbone
@@ -44,6 +44,27 @@ class ResNet(nn.Module):
         self.layer4 = net.layer4
         # dropout
         self.dropout = nn.Dropout2d(p=dropout_rate)
+        
+        self.projects = nn.ModuleList([
+            nn.Conv2d(
+                in_channels=512,
+                out_channels=embed_dims,
+                kernel_size=3,
+                stride=1,
+                padding=1),
+            nn.Conv2d(
+                in_channels=1024,
+                out_channels=embed_dims,
+                kernel_size=3,
+                stride=1,
+                padding=1),
+            nn.Conv2d(
+                in_channels=2048,
+                out_channels=embed_dims,
+                kernel_size=3,
+                stride=1,
+                padding=1)
+        ])
 
     def forward(self, x):
         # pad input to be divisible by 16 = 2 ** 4
@@ -61,5 +82,13 @@ class ResNet(nn.Module):
         layer2_out = self.layer2(layer1_out)  # downsample
         layer3_out = self.dropout(self.layer3(layer2_out))  # downsample
         layer4_out = self.dropout(self.layer4(layer3_out))  # downsample
-
-        return [layer1_out, layer2_out, layer3_out, layer4_out]
+        
+        layer2_out = self.projects[0](layer2_out)
+        layer3_out = self.projects[1](layer3_out)
+        layer4_out = self.projects[2](layer4_out)
+        
+        feats = [layer2_out, layer3_out, layer4_out]
+        
+        return dict(                                                   
+            feats=feats,
+            encoder_feat_ori=feats[-1])

@@ -15,9 +15,17 @@ model:
     depth_dataset: nyu
 
   encoder:
-    type: Dinov2VLFEncoder
+    type: Dinov2Encoder
     model_name: dinov2_vitb14
     checkpoint_path: checkpoints/dinov2_vitb14_pretrain.pth
+  # encoder:
+  #   type: MMDetWrapper
+  #   config_path: maskdino/configs/maskdino_r50_8xb2-panoptic-export.py
+  #   custom_imports: maskdino
+  #   checkpoint_path: checkpoints/maskdino_r50_50e_300q_panoptic_pq53.0.pth
+
+  # encoder:
+  #   type: ResNet
 
   # encoder:
   #   type: GaussianFormerEncoder

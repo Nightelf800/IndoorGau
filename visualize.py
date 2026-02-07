@@ -309,7 +309,6 @@ def main(cfg: DictConfig):
         for batch_inputs, targets in track(data_loader):
             # print(batch_inputs.keys())
             # print('batch_inputs.name: {}'.format(batch_inputs['name']))
-            scenes = batch_inputs['scene']  # 假设 'name' 标识场景
             filenames = batch_inputs['filename']
 
             targets = {key: targets[key].cuda() for key in targets}
@@ -329,10 +328,9 @@ def main(cfg: DictConfig):
             if test_evaluator:
                 test_evaluator.update(outputs, targets)
 
-            batch_size = len(scenes)
+            batch_size = len(filenames)
             assert batch_size == 1
             for i in range(batch_size):
-                scene = scenes[i]
                 filename = filenames[i]
                 voxel_origin = batch_inputs['voxel_origin'][i].detach().cpu().numpy()
                 cam_pose = batch_inputs['cam_pose'][i].detach().cpu().numpy()
@@ -347,17 +345,16 @@ def main(cfg: DictConfig):
                 print(f'############## visual ##############')
                 print(f'pred visual')
                 print(f'file: {filename}')
-                print(f'scene: {scene}')
-                draw('SYNData', prev_occ_output, cam_pose, prev_voxel_origin, fov_mask,
+                draw('NYUv2', prev_occ_output, cam_pose, prev_voxel_origin, fov_mask,
                      (640, 480), cam_K[0, 0], need_update_view=False)
                 # draw('SYNData', prev_occ_output, cam_pose, prev_voxel_origin, fov_mask,
-                #      (640, 480), cam_K[0, 0], save_path='./outputs/visual/1014/pred/', file_name=f'visual_{scene}_{filename}.png',
+                #      (640, 480), cam_K[0, 0], save_path='./outputs/visual/1014/pred/', file_name=f'visual_{filename}.png',
                 #      need_update_view=False)
                 print(f'target visual')
-                draw('SYNData', target_np, cam_pose, prev_voxel_origin, fov_mask,
+                draw('NYUv2', target_np, cam_pose, prev_voxel_origin, fov_mask,
                      (640, 480), cam_K[0, 0], need_update_view=False)
                 # draw('SYNData', target_np, cam_pose, prev_voxel_origin, fov_mask,
-                #      (640, 480), cam_K[0, 0], save_path='./outputs/visual/1014/gt/', file_name=f'visual_{scene}_{filename}.png',
+                #      (640, 480), cam_K[0, 0], save_path='./outputs/visual/1014/gt/', file_name=f'visual_{filename}.png',
                 #      need_update_view=False)
 
 
